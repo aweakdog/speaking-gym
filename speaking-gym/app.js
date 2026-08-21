@@ -291,7 +291,7 @@ function renderShadow() {
       ${stepHeader(1)}
       <div class="progress-dots">${dots}</div>
       <h2>句子 ${i + 1} / ${session.shadowSet.length}</h2>
-      <p class="desc">先点「听读音」体会语调 → 再点「我来跟读」模仿着说 → 目标 85 分以上。语调是情感的载体，重点模仿提示里的处理方式。</p>
+      <p class="desc">先点「听读音」体会语调 → 再点「我来跟读」模仿着说 → 目标 85 分以上（录音由服务器 Whisper 精确识别，不用担心生僻表达被浏览器听错）。语调是情感的载体，重点模仿提示里的处理方式。</p>
       <div class="en-line">${esc(item.en)}</div>
       <div class="zh-line">${esc(item.zh)}</div>
       <div class="focus-line">语调提示：${esc(item.focus)}</div>
@@ -303,19 +303,19 @@ function renderShadow() {
       <div id="shadowOut"></div>
     </div>`;
   $("#btnPlay").onclick = () => speak(item.en);
-  $("#btnRec").onclick = () => {
-    $("#shadowOut").innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在听你说……（说完停顿即自动结束）</div>`;
-    recognizeOnce((text) => {
-      if (!text) {
-        $("#shadowOut").innerHTML = `<div class="result-box">没有听清，请再试一次（离麦克风近一点，语速放慢）。</div>`;
-        return;
-      }
-      const sc = shadowScore(item.en, text);
+  $("#btnRec").onclick = async () => {
+    const out = () => $("#shadowOut");
+    out().innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在听你说……（说完停顿即自动结束）</div>`;
+    const recOk = await startRecording();
+    let done = false;
+    const showResult = (text, sc, src) => {
+      if (!out()) return;
       const cls = sc >= 85 ? "good" : sc >= 60 ? "mid" : "low";
       const tip = sc >= 85 ? "很好，可以进入下一句" : "再听一遍读音，重点模仿语调后重试";
-      $("#shadowOut").innerHTML = `
+      const srcLabel = src === "whisper" ? "Whisper 精确识别 · 你说的是" : "浏览器识别（可能不准）· 你说的是";
+      out().innerHTML = `
         <div class="result-box">
-          <span class="label">识别到你说的是</span>${esc(text)}
+          <span class="label">${srcLabel}</span>${esc(text)}
           <div style="margin-top:10px"><span class="score ${cls}">${sc}</span> 分 · ${tip}</div>
           <div style="margin-top:10px">
             <button class="btn secondary" id="btnAgain">再试一次</button>
@@ -324,7 +324,34 @@ function renderShadow() {
         </div>`;
       $("#btnAgain").onclick = () => renderShadow();
       $("#btnNext").onclick = () => { session.scores.push(sc); advanceShadow(); };
-    });
+    };
+    const finish = async (browserText) => {
+      if (done) return;
+      done = true;
+      const blob = await stopRecording();
+      if (!out()) return;
+      if (blob) {
+        out().innerHTML = browserText
+          ? `<div class="result-box"><span class="label">初步识别（浏览器）</span>${esc(browserText)}<div class="muted-sm" style="margin-top:6px">Whisper 精确识别中……（约 2-5 秒）</div></div>`
+          : `<div class="result-box"><div class="muted-sm">Whisper 精确识别中……（约 2-5 秒）</div></div>`;
+        try {
+          const resp = await api(`/api/shadow-score?target=${encodeURIComponent(item.en)}`, { method: "POST", blob, mime: blob.type });
+          if (resp.score != null) return showResult(resp.transcript, resp.score, "whisper");
+        } catch (_) {}
+      }
+      if (browserText) return showResult(browserText, shadowScore(item.en, browserText), "browser");
+      if (out()) out().innerHTML = `<div class="result-box">没有听清，请再试一次（离麦克风近一点，语速放慢）。</div>`;
+    };
+    if (SR) {
+      recognizeOnce((text) => finish(text));
+    } else if (recOk) {
+      out().innerHTML = `
+        <div class="rec-live"><div class="rec-dot"></div>正在录音……读完这句后点下方按钮</div>
+        <div style="margin-top:8px"><button class="btn" id="btnStopShadow">说完了</button></div>`;
+      $("#btnStopShadow").onclick = () => finish("");
+    } else {
+      out().innerHTML = `<div class="result-box">无法使用麦克风，请在浏览器地址栏允许麦克风权限后重试。</div>`;
+    }
   };
   $("#btnSkip").onclick = () => advanceShadow();
 }

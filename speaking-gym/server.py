@@ -152,6 +152,50 @@ def transcribe_file(path):
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
 FILLER_RE_PY = re.compile(r"\b(um|uh|er|erm|hmm|you\s+know|i\s+mean|like)\b", re.I)
 
+# ---------- 跟读相似度打分 ----------
+CONTRACTIONS = {
+    "i'm": "i am", "i'd": "i would", "i've": "i have", "i'll": "i will",
+    "you're": "you are", "you've": "you have", "you'd": "you would", "you'll": "you will",
+    "he's": "he is", "she's": "she is", "it's": "it is", "that's": "that is",
+    "we're": "we are", "we've": "we have", "we'd": "we would", "we'll": "we will",
+    "they're": "they are", "they've": "they have", "they'd": "they would", "they'll": "they will",
+    "don't": "do not", "doesn't": "does not", "didn't": "did not",
+    "can't": "cannot", "couldn't": "could not", "won't": "will not", "wouldn't": "would not",
+    "shouldn't": "should not", "isn't": "is not", "aren't": "are not",
+    "wasn't": "was not", "weren't": "were not",
+    "haven't": "have not", "hasn't": "has not", "hadn't": "had not",
+    "let's": "let us", "there's": "there is", "what's": "what is", "who's": "who is",
+    "how's": "how is", "where's": "where is",
+    "gonna": "going to", "wanna": "want to", "gotta": "got to", "kinda": "kind of",
+}
+
+
+def norm_words(s):
+    toks = re.sub(r"[^a-z0-9' ]+", " ", s.lower()).split()
+    out = []
+    for t in toks:
+        t = t.strip("'")
+        if t in CONTRACTIONS:
+            out.extend(CONTRACTIONS[t].split())
+        elif t:
+            out.append(t)
+    return out
+
+
+def lcs_len(a, b):
+    dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            dp[i][j] = dp[i - 1][j - 1] + 1 if a[i - 1] == b[j - 1] else max(dp[i - 1][j], dp[i][j - 1])
+    return dp[len(a)][len(b)]
+
+
+def shadow_similarity(target, said):
+    t, s = norm_words(target), norm_words(said)
+    if not t or not s:
+        return 0
+    return int(round(100.0 * lcs_len(t, s) / len(t)))
+
 
 # ---------- DeepSeek 评分 ----------
 SCORE_SYSTEM = (
@@ -295,6 +339,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_settings()
             if p == "/api/score":
                 return self.api_score()
+            if p == "/api/shadow-score":
+                return self.api_shadow_score()
             if p == "/api/recordings":
                 return self.api_upload()
             return self.fail("not found", 404)
@@ -495,6 +541,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "ai": ai, "reason": reason, "asr": asr,
             "transcript": transcript, "wpm": wpm, "words": words, "fillers": fillers,
         })
+
+    # --- 跟读打分（Whisper 转写 + 相似度，不入库） ---
+    def api_shadow_score(self):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        if not whisper_available():
+            return self.send_json({"score": None, "reason": "no_whisper"})
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        target = (q.get("target") or [""])[0].strip()
+        if not target:
+            return self.fail("missing target")
+        blob = self.body_raw(limit=10_000_000)
+        if not blob:
+            return self.fail("empty audio")
+        mime = self.headers.get("Content-Type") or "audio/webm"
+        suffix = ".m4a" if "mp4" in mime else ".webm"
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(blob)
+            tmp_path = f.name
+        try:
+            text = transcribe_file(tmp_path)
+        except Exception as e:
+            return self.fail("transcribe failed: %s" % e, 500)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        return self.send_json({"score": shadow_similarity(target, text), "transcript": text})
 
     # --- 录音 ---
     def api_upload(self):
