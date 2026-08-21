@@ -1,0 +1,5 @@
+.DS_Store
+*.pem
+speaking-gym/data/
+speaking-gym/server.log
+__pycache__/

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<title>口语练习室 Speaking Gym</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">口语练习室<span class="sub">Speaking Gym</span></div>
+  <div class="header-right">
+    <div id="userArea"></div>
+    <label class="rate-label">朗读语速
+      <select id="rate">
+        <option value="0.75">慢 0.75x</option>
+        <option value="0.9" selected>中 0.9x</option>
+        <option value="1.0">正常 1.0x</option>
+      </select>
+    </label>
+    <div id="streakBadge" class="streak">连续 0 天</div>
+  </div>
+</header>
+
+<nav id="tabs">
+  <button data-tab="daily" class="active">每日练习</button>
+  <button data-tab="phrases">语块库</button>
+  <button data-tab="progress">进度</button>
+</nav>
+
+<div id="srWarn" class="warn hidden">
+  当前浏览器不支持实时语音识别（跟读打分和实时字幕不可用），但<b>话题表达不受影响</b>：录音会由服务器 Whisper 精确转写并评分。想要完整体验可换 <b>Edge</b> 或 <b>Safari</b>。
+</div>
+
+<main id="view"></main>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
