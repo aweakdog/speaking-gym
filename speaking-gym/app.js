@@ -111,14 +111,31 @@ loadVoices();
 if (speechSynthesis.onvoiceschanged !== undefined) speechSynthesis.onvoiceschanged = loadVoices;
 
 function pickVoice() {
-  return voices.find((v) => /Samantha|Google US English|Aria|Ava|Zira/i.test(v.name))
+  return voices.find((v) => /Natural|Samantha|Google US English|Aria|Ava|Zira/i.test(v.name))
     || voices.find((v) => v.lang === "en-US") || voices[0];
 }
-function speak(text) {
+let ttsAudio = null;
+async function speak(text) {
   speechSynthesis.cancel();
+  if (ttsAudio) { try { ttsAudio.pause(); } catch (_) {} ttsAudio = null; }
+  const rate = $("#rate").value || "0.9";
+  const voice = ($("#voice") && $("#voice").value) || "aria";
+  if (AUTH.token) {
+    try {
+      const res = await fetch(`/api/tts?text=${encodeURIComponent(text)}&rate=${rate}&voice=${voice}`, {
+        headers: { Authorization: "Bearer " + AUTH.token },
+      });
+      if (res.ok) {
+        const blob = await res.blob();
+        ttsAudio = new Audio(URL.createObjectURL(blob));
+        ttsAudio.play();
+        return;
+      }
+    } catch (_) {}
+  }
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "en-US";
-  u.rate = parseFloat($("#rate").value || "0.9");
+  u.rate = parseFloat(rate);
   const v = pickVoice();
   if (v) u.voice = v;
   speechSynthesis.speak(u);
@@ -337,15 +354,25 @@ function renderShadow() {
   $("#btnPlay").onclick = () => speak(item.en);
   $("#btnRec").onclick = async () => {
     const out = () => $("#shadowOut");
-    const showResult = (text, sc, src) => {
+    const showResult = (text, sc, src, pitchVar) => {
       if (!out()) return;
       const cls = sc >= 85 ? "good" : sc >= 60 ? "mid" : "low";
       const tip = sc >= 85 ? "很好，可以进入下一句" : "再听一遍读音，重点模仿语调后重试";
       const srcLabel = src === "whisper" ? "Whisper 精确识别 · 你说的是" : "浏览器识别（可能不准）· 你说的是";
+      let pitchHtml = "";
+      if (pitchVar != null) {
+        const [pLabel, pCls, pTip] = pitchVar < 1.8
+          ? ["偏平直", "low", "语调像一条直线——试着夸张地把提示里的重音和升降调读出来"]
+          : pitchVar < 3.2
+            ? ["适中", "mid", "有起伏了，可以再大胆一点，突出关键词"]
+            : ["丰富", "good", "语调起伏很自然，保持住"];
+        pitchHtml = `<div style="margin-top:6px" class="muted-sm">语调起伏：<span class="score ${pCls}" style="font-size:15px">${pitchVar}</span> 半音 · ${pLabel}——${pTip}</div>`;
+      }
       out().innerHTML = `
         <div class="result-box">
           <span class="label">${srcLabel}</span>${esc(text)}
           <div style="margin-top:10px"><span class="score ${cls}">${sc}</span> 分 · ${tip}</div>
+          ${pitchHtml}
           <div style="margin-top:10px">
             <button class="btn secondary" id="btnAgain">再试一次</button>
             <button class="btn" id="btnNext">${i + 1 < session.shadowSet.length ? "下一句" : "进入话题表达"}</button>
@@ -376,7 +403,7 @@ function renderShadow() {
       if (blob) {
         try {
           const resp = await api(`/api/shadow-score?target=${encodeURIComponent(item.en)}`, { method: "POST", blob, mime: blob.type });
-          if (resp.score != null) return showResult(resp.transcript, resp.score, "whisper");
+          if (resp.score != null) return showResult(resp.transcript, resp.score, "whisper", resp.pitch_var);
         } catch (_) {}
       }
       if (out()) out().innerHTML = `<div class="result-box">没有录到声音或识别失败，请再试一次（离麦克风近一点）。</div>`;

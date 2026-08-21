@@ -21,7 +21,9 @@ from datetime import date
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.abspath(os.environ.get("SG_DATA_DIR", os.path.join(BASE, "data")))
 REC_DIR = os.path.join(DATA, "recordings")
+TTS_DIR = os.path.join(DATA, "tts")
 os.makedirs(REC_DIR, exist_ok=True)
+os.makedirs(TTS_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA, "gym.db")
 
 CONFIG = {}
@@ -195,6 +197,61 @@ def shadow_similarity(target, said):
     if not t or not s:
         return 0
     return int(round(100.0 * lcs_len(t, s) / len(t)))
+
+
+# ---------- 语调起伏度（音高半音标准差） ----------
+def load_audio_mono(path, sr=16000):
+    import av
+    import numpy as np
+    chunks = []
+    with av.open(path) as container:
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
+        for frame in container.decode(container.streams.audio[0]):
+            for f in resampler.resample(frame):
+                chunks.append(f.to_ndarray())
+    if not chunks:
+        return None, sr
+    audio = np.concatenate(chunks, axis=1).flatten().astype("float32") / 32768.0
+    return audio, sr
+
+
+def pitch_variability(path):
+    """返回音高起伏度（半音标准差），无法分析时返回 None。"""
+    try:
+        import numpy as np
+        import parselmouth
+        audio, sr = load_audio_mono(path)
+        if audio is None or len(audio) < sr:
+            return None
+        snd = parselmouth.Sound(audio, sampling_frequency=sr)
+        pitch = snd.to_pitch(time_step=0.01, pitch_floor=75, pitch_ceiling=500)
+        f0 = pitch.selected_array["frequency"]
+        f0 = f0[f0 > 0]
+        if len(f0) < 20:
+            return None
+        semitones = 12.0 * np.log2(f0 / np.median(f0))
+        semitones = semitones[np.abs(semitones) <= 12]  # 去除倍频跟踪错误的离群点
+        if len(semitones) < 20:
+            return None
+        return round(float(np.std(semitones)), 1)
+    except Exception as e:
+        sys.stderr.write("pitch analysis failed: %s\n" % e)
+        return None
+
+
+# ---------- 神经网络 TTS（edge-tts，带磁盘缓存） ----------
+TTS_VOICES = {"aria": "en-US-AriaNeural", "guy": "en-US-GuyNeural", "jenny": "en-US-JennyNeural"}
+TTS_RATES = {"0.75": "-25%", "0.9": "-10%", "1.0": "+0%"}
+
+
+def tts_generate(text, voice, rate, out_path):
+    import asyncio
+    import edge_tts
+
+    async def run():
+        await asyncio.wait_for(edge_tts.Communicate(text, voice, rate=rate).save(out_path), 20)
+
+    asyncio.run(run())
 
 
 # ---------- DeepSeek 评分 ----------
@@ -411,12 +468,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "WHERE u.public_audio=1 ORDER BY r.ts DESC LIMIT 50"
                     ).fetchall()
                 return self.send_json({"items": [dict(r) for r in rows]})
+            if p == "/api/tts":
+                return self.api_tts()
             m = re.match(r"^/api/audio/(\d+)$", p)
             if m:
                 return self.api_audio(int(m.group(1)))
             return self.fail("not found", 404)
         except Exception as e:
             return self.fail("server error: %s" % e, 500)
+
+    # --- 神经网络朗读 ---
+    def api_tts(self):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        text = (q.get("text") or [""])[0].strip()[:300]
+        if not text:
+            return self.fail("missing text")
+        voice = TTS_VOICES.get((q.get("voice") or ["aria"])[0], TTS_VOICES["aria"])
+        rate = TTS_RATES.get((q.get("rate") or ["0.9"])[0], "-10%")
+        import hashlib
+        key = hashlib.sha1(("%s|%s|%s" % (voice, rate, text)).encode()).hexdigest()
+        fp = os.path.join(TTS_DIR, key + ".mp3")
+        if not os.path.exists(fp) or os.path.getsize(fp) == 0:
+            try:
+                tts_generate(text, voice, rate, fp)
+            except Exception as e:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+                return self.fail("tts failed: %s" % e, 502)
+        with open(fp, "rb") as f:
+            raw = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "private, max-age=604800")
+        self.end_headers()
+        self.wfile.write(raw)
 
     # --- 账号 ---
     def api_register(self):
@@ -564,6 +655,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             tmp_path = f.name
         try:
             text = transcribe_file(tmp_path)
+            pv = pitch_variability(tmp_path)
         except Exception as e:
             return self.fail("transcribe failed: %s" % e, 500)
         finally:
@@ -571,7 +663,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 os.remove(tmp_path)
             except OSError:
                 pass
-        return self.send_json({"score": shadow_similarity(target, text), "transcript": text})
+        return self.send_json({
+            "score": shadow_similarity(target, text), "transcript": text, "pitch_var": pv,
+        })
 
     # --- 录音 ---
     def api_upload(self):
