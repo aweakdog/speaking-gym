@@ -213,10 +213,42 @@ function stopRecording() {
   });
 }
 function discardRecording() {
+  stopVad();
   const { mr, stream } = recorder;
   if (mr && mr.state !== "inactive") try { mr.stop(); } catch (_) {}
   if (stream) stream.getTracks().forEach((t) => t.stop());
   recorder.mr = null; recorder.stream = null; recorder.chunks = [];
+}
+
+/* ============ 音量检测（跟读自动断句：停顿 2 秒才结束，逗号换气不会截断） ============ */
+const vad = { ctx: null, timer: null };
+function startVad(stream, onStop, { threshold = 0.02, silenceMs = 2000, maxMs = 20000 } = {}) {
+  stopVad();
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  const ctx = new Ctx();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Uint8Array(analyser.fftSize);
+  let spoke = false, silent = 0, total = 0, last = performance.now();
+  vad.ctx = ctx;
+  vad.timer = setInterval(() => {
+    analyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / buf.length);
+    const now = performance.now();
+    const dt = now - last;
+    last = now; total += dt;
+    if (rms > threshold) { spoke = true; silent = 0; }
+    else if (spoke) silent += dt;
+    if ((spoke && silent >= silenceMs) || total >= maxMs) { stopVad(); onStop(); }
+  }, 100);
+}
+function stopVad() {
+  if (vad.timer) { clearInterval(vad.timer); vad.timer = null; }
+  if (vad.ctx) { try { vad.ctx.close(); } catch (_) {} vad.ctx = null; }
 }
 
 /* ============ 文本分析 ============ */
@@ -305,9 +337,6 @@ function renderShadow() {
   $("#btnPlay").onclick = () => speak(item.en);
   $("#btnRec").onclick = async () => {
     const out = () => $("#shadowOut");
-    out().innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在听你说……（说完停顿即自动结束）</div>`;
-    const recOk = await startRecording();
-    let done = false;
     const showResult = (text, sc, src) => {
       if (!out()) return;
       const cls = sc >= 85 ? "good" : sc >= 60 ? "mid" : "low";
@@ -325,38 +354,44 @@ function renderShadow() {
       $("#btnAgain").onclick = () => renderShadow();
       $("#btnNext").onclick = () => { session.scores.push(sc); advanceShadow(); };
     };
-    const finish = async (browserText) => {
+    out().innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在准备麦克风……</div>`;
+    const recOk = await startRecording();
+    if (!recOk) {
+      if (!SR) { out().innerHTML = `<div class="result-box">无法使用麦克风，请在浏览器地址栏允许麦克风权限后重试。</div>`; return; }
+      out().innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在听你说……（浏览器识别）</div>`;
+      recognizeOnce((text) => {
+        if (!text) { if (out()) out().innerHTML = `<div class="result-box">没有听清，请再试一次。</div>`; return; }
+        showResult(text, shadowScore(item.en, text), "browser");
+      });
+      return;
+    }
+    let done = false;
+    const finish = async () => {
       if (done) return;
       done = true;
+      stopVad();
       const blob = await stopRecording();
       if (!out()) return;
+      out().innerHTML = `<div class="result-box"><div class="muted-sm">Whisper 精确识别中……（约 2-5 秒）</div></div>`;
       if (blob) {
-        out().innerHTML = browserText
-          ? `<div class="result-box"><span class="label">初步识别（浏览器）</span>${esc(browserText)}<div class="muted-sm" style="margin-top:6px">Whisper 精确识别中……（约 2-5 秒）</div></div>`
-          : `<div class="result-box"><div class="muted-sm">Whisper 精确识别中……（约 2-5 秒）</div></div>`;
         try {
           const resp = await api(`/api/shadow-score?target=${encodeURIComponent(item.en)}`, { method: "POST", blob, mime: blob.type });
           if (resp.score != null) return showResult(resp.transcript, resp.score, "whisper");
         } catch (_) {}
       }
-      if (browserText) return showResult(browserText, shadowScore(item.en, browserText), "browser");
-      if (out()) out().innerHTML = `<div class="result-box">没有听清，请再试一次（离麦克风近一点，语速放慢）。</div>`;
+      if (out()) out().innerHTML = `<div class="result-box">没有录到声音或识别失败，请再试一次（离麦克风近一点）。</div>`;
     };
-    if (SR) {
-      recognizeOnce((text) => finish(text));
-    } else if (recOk) {
-      out().innerHTML = `
-        <div class="rec-live"><div class="rec-dot"></div>正在录音……读完这句后点下方按钮</div>
-        <div style="margin-top:8px"><button class="btn" id="btnStopShadow">说完了</button></div>`;
-      $("#btnStopShadow").onclick = () => finish("");
-    } else {
-      out().innerHTML = `<div class="result-box">无法使用麦克风，请在浏览器地址栏允许麦克风权限后重试。</div>`;
-    }
+    out().innerHTML = `
+      <div class="rec-live"><div class="rec-dot"></div>正在录音……读完整句后<b>停顿 2 秒</b>自动结束（逗号处换气不会截断）</div>
+      <div style="margin-top:8px"><button class="btn secondary" id="btnStopShadow">说完了</button></div>`;
+    $("#btnStopShadow").onclick = finish;
+    startVad(recorder.stream, finish);
   };
   $("#btnSkip").onclick = () => advanceShadow();
 }
 function advanceShadow() {
   stopAllRec();
+  discardRecording();
   if (session.shadowIdx + 1 < session.shadowSet.length) { session.shadowIdx++; renderShadow(); }
   else { session.step = 2; renderDaily(); }
 }
