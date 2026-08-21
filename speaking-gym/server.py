@@ -309,8 +309,17 @@ def deepseek_score(payload):
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + DEEPSEEK_KEY},
     )
-    with urllib.request.urlopen(req, timeout=90) as r:
-        resp = json.load(r)
+    resp = None
+    for attempt in range(2):  # 瞬时故障自动重试一次
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                resp = json.load(r)
+            break
+        except Exception as e:
+            sys.stderr.write("deepseek attempt %d failed: %s\n" % (attempt + 1, e))
+            if attempt == 1:
+                raise
+            time.sleep(2)
     data = json.loads(resp["choices"][0]["message"]["content"])
     data["score"] = max(0, min(100, int(data.get("score", 0))))
     dims = data.get("dims") or {}
@@ -400,6 +409,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_shadow_score()
             if p == "/api/recordings":
                 return self.api_upload()
+            m = re.match(r"^/api/rescore/(\d+)$", p)
+            if m:
+                return self.api_rescore(int(m.group(1)))
             return self.fail("not found", 404)
         except Exception as e:
             return self.fail("server error: %s" % e, 500)
@@ -612,6 +624,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 })
             except Exception as e:
                 reason = "ai_failed: %s" % e
+                sys.stderr.write("deepseek score failed (user %s): %s\n" % (user["id"], e))
         with db() as c:
             c.execute(
                 "INSERT INTO scores (user_id, date, ts, cat, topic, round, wpm, words, fillers, sec, ai_score, ai_json) "
@@ -632,6 +645,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "ai": ai, "reason": reason, "asr": asr,
             "transcript": transcript, "wpm": wpm, "words": words, "fillers": fillers,
         })
+
+    # --- 补评：对已有转写但缺 AI 结果的录音重新评分 ---
+    def api_rescore(self, rid):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        if not DEEPSEEK_KEY:
+            return self.fail("服务器未配置 AI Key")
+        with db() as c:
+            rec = c.execute("SELECT * FROM recordings WHERE id=? AND user_id=?", (rid, user["id"])).fetchone()
+        if not rec:
+            return self.fail("not found", 404)
+        transcript = (rec["transcript"] or "").strip()
+        if len(transcript.split()) < 15:
+            return self.fail("转写太短，无法评分")
+        try:
+            ai = deepseek_score({
+                "topic": rec["topic"], "transcript": transcript,
+                "duration_sec": rec["sec"], "wpm": rec["wpm"],
+                "filler_count": len(FILLER_RE_PY.findall(transcript)), "round": rec["round"],
+            })
+        except Exception as e:
+            return self.fail("AI 评分失败：%s" % e, 502)
+        aij = json.dumps(ai, ensure_ascii=False)
+        with db() as c:
+            c.execute(
+                "UPDATE recordings SET ai_score=?, ai_json=? WHERE id=? AND user_id=?",
+                (ai["score"], aij, rid, user["id"]),
+            )
+            srow = c.execute(
+                "SELECT id FROM scores WHERE user_id=? AND ai_score IS NULL AND round=? AND sec=? AND wpm=? "
+                "ORDER BY ts DESC LIMIT 1",
+                (user["id"], rec["round"], rec["sec"], rec["wpm"]),
+            ).fetchone()
+            if srow:
+                c.execute("UPDATE scores SET ai_score=?, ai_json=? WHERE id=?", (ai["score"], aij, srow["id"]))
+        return self.send_json({"ai": ai})
 
     # --- 跟读打分（Whisper 转写 + 相似度，不入库） ---
     def api_shadow_score(self):

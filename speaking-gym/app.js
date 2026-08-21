@@ -602,7 +602,7 @@ function renderAiBox(resp) {
   if (!box) return;
   if (!resp.ai) {
     const msgs = { no_key: "服务器未配置 AI Key，已仅保存数据。", too_short: "本轮内容太短（不足 15 个词），未进行 AI 评分。" };
-    box.innerHTML = `<div class="ai-loading">${msgs[resp.reason] || "AI 评分暂时不可用，本轮数据已保存。"}</div>`;
+    box.innerHTML = `<div class="ai-loading">${msgs[resp.reason] || "AI 评分暂时不可用（转写已保存）。稍后可在「进度 → 我的历史记录」中对这条点「补评」。"}</div>`;
     return;
   }
   box.innerHTML = aiDetailHtml(resp.ai);
@@ -842,7 +842,7 @@ function recListHtml(items, isPublic) {
       ${hasDetail ? `
       <div class="rec-detail hidden">
         ${r.transcript ? `<div class="result-box"><span class="label">转写</span>${highlightFillers(r.transcript)}</div>` : ""}
-        ${ai ? `<div class="ai-box" style="margin-top:10px">${aiDetailHtml(ai)}</div>` : `<p class="muted-sm">本条无 AI 评分。</p>`}
+        ${ai ? `<div class="ai-box" style="margin-top:10px">${aiDetailHtml(ai)}</div>` : `<p class="muted-sm">本条无 AI 评分（当时可能网络波动）。${!isPublic && r.transcript ? `<button class="btn secondary rec-rescore" data-id="${r.id}" style="margin-left:8px;padding:5px 12px;font-size:12.5px">补评</button>` : ""}</p>`}
       </div>` : ""}
     </div>`;
   }
@@ -862,6 +862,14 @@ function bindRecList(root) {
       const d = b.closest(".rec-item").querySelector(".rec-detail");
       d.classList.toggle("hidden");
       b.textContent = d.classList.contains("hidden") ? "详情" : "收起";
+    };
+  });
+  root.querySelectorAll(".rec-rescore").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      b.textContent = "评分中…";
+      try { await api(`/api/rescore/${b.dataset.id}`, { method: "POST", json: {} }); renderProgress(); }
+      catch (e) { b.disabled = false; b.textContent = "补评"; alert("补评失败：" + e.message); }
     };
   });
   root.querySelectorAll(".rec-del").forEach((b) => {
