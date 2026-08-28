@@ -83,6 +83,17 @@ def init_db():
             c.execute("ALTER TABLE recordings ADD COLUMN transcript TEXT")
         if "ai_json" not in cols:
             c.execute("ALTER TABLE recordings ADD COLUMN ai_json TEXT")
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ts INTEGER, role TEXT, content TEXT, fix_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS chat_memory (
+            user_id INTEGER PRIMARY KEY,
+            summary TEXT, last_msg_id INTEGER DEFAULT 0, updated INTEGER
+        );
+        """)
 
 
 def hash_pw(pw, salt_hex):
@@ -293,34 +304,34 @@ SCORE_SYSTEM = (
 )
 
 
-def deepseek_score(payload):
-    body = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": SCORE_SYSTEM},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.3,
-        "max_tokens": 1500,
-    }
+def deepseek_call(messages, temperature=0.3, max_tokens=900, json_mode=True):
+    body = {"model": "deepseek-chat", "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(
         "https://api.deepseek.com/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + DEEPSEEK_KEY},
     )
-    resp = None
     for attempt in range(2):  # 瞬时故障自动重试一次
         try:
             with urllib.request.urlopen(req, timeout=90) as r:
                 resp = json.load(r)
-            break
+            return resp["choices"][0]["message"]["content"]
         except Exception as e:
             sys.stderr.write("deepseek attempt %d failed: %s\n" % (attempt + 1, e))
             if attempt == 1:
                 raise
             time.sleep(2)
-    data = json.loads(resp["choices"][0]["message"]["content"])
+
+
+def deepseek_score(payload):
+    content = deepseek_call(
+        [{"role": "system", "content": SCORE_SYSTEM},
+         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        temperature=0.3, max_tokens=1500,
+    )
+    data = json.loads(content)
     data["score"] = max(0, min(100, int(data.get("score", 0))))
     dims = data.get("dims") or {}
     data["dims"] = {k: max(0, min(100, int(dims.get(k, 0)))) for k in ("fluency", "vocabulary", "grammar", "content")}
@@ -329,6 +340,109 @@ def deepseek_score(payload):
     data["model"] = str(data.get("model", "")).strip()
     data["comment_zh"] = str(data.get("comment_zh", ""))
     return data
+
+
+# ---------- AI 对话（带长期记忆） ----------
+CHAT_SYSTEM = (
+    "You are Buddy, a warm, witty English conversation partner and speaking coach for a Chinese intermediate learner "
+    "(CEFR B1-B2). Rules:\n"
+    "1. Reply in natural spoken English, 2-4 short sentences. Ask at most ONE follow-up question, digging into what "
+    "they actually said. Be genuinely curious.\n"
+    "2. Use the MEMORY notes to stay consistent and personal: reference their name, job, plans and past "
+    "conversations naturally when relevant, like a friend who remembers.\n"
+    "3. Keep vocabulary mostly B1-B2, but occasionally drop ONE vivid idiomatic expression worth learning.\n"
+    "4. If their message contains one notable error or unnatural phrasing, add a brief fix (their original words, "
+    "the natural version, short Chinese explanation). Skip trivial slips and speech-recognition artifacts; at most "
+    "one fix per turn, or null.\n"
+    "5. Never lecture, never write essays. Keep it flowing like a real chat.\n"
+    'Respond with JSON ONLY: {"reply": "...", "fix": {"original": "...", "better": "...", "why_zh": "..."} or null}'
+)
+
+SUMMARY_SYSTEM = (
+    "You maintain long-term memory notes about an English learner, based on their chats with an AI partner. "
+    "Merge the existing notes and the new conversation excerpt into updated notes, max 250 words, in English. "
+    "Keep: personal facts (name, job, family, hobbies), preferences, ongoing plans and events, recurring English "
+    "mistakes, and topics already discussed (so the partner never repeats itself). Drop small talk. "
+    "Respond with the plain-text notes only."
+)
+
+
+def parse_chat_json(content):
+    """模型输出的容错解析：裸 JSON → 提取 {} 块 → 整段当作 reply。"""
+    content = (content or "").strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.S).strip()
+    try:
+        return json.loads(content)
+    except Exception:
+        m = re.search(r"\{.*\}", content, re.S)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+    sys.stderr.write("chat json fallback, raw head: %r\n" % content[:200])
+    return {"reply": content, "fix": None}
+
+
+def chat_turn(uid, text):
+    with db() as c:
+        mem = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
+        recent = [dict(r) for r in c.execute(
+            "SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 16", (uid,)
+        ).fetchall()][::-1]
+    summary = (mem["summary"] if mem else "") or "(nothing yet — the conversation just started)"
+    msgs = [{"role": "system", "content": CHAT_SYSTEM + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
+    for m in recent:
+        if m["role"] == "assistant":
+            # 历史 assistant 消息统一还原成 JSON 形态，与要求的输出格式保持一致
+            msgs.append({"role": "assistant", "content": json.dumps({"reply": m["content"]}, ensure_ascii=False)})
+        else:
+            msgs.append({"role": "user", "content": m["content"]})
+    msgs.append({"role": "user", "content": text})
+    data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=600))
+    reply = str(data.get("reply", "")).strip() or "Sorry, could you say that again?"
+    fix = data.get("fix") or None
+    now = int(time.time() * 1000)
+    with db() as c:
+        c.execute("INSERT INTO chat_messages (user_id, ts, role, content) VALUES (?,?,?,?)", (uid, now, "user", text))
+        c.execute(
+            "INSERT INTO chat_messages (user_id, ts, role, content, fix_json) VALUES (?,?,?,?,?)",
+            (uid, now + 1, "assistant", reply, json.dumps(fix, ensure_ascii=False) if fix else None),
+        )
+    threading.Thread(target=maybe_summarize, args=(uid,), daemon=True).start()
+    return {"reply": reply, "fix": fix}
+
+
+def maybe_summarize(uid):
+    """未摘要消息超过 40 条时，把较早的部分并入长期记忆笔记。"""
+    try:
+        with db() as c:
+            mem = c.execute("SELECT * FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
+            last_id = mem["last_msg_id"] if mem else 0
+            rows = [dict(r) for r in c.execute(
+                "SELECT id, role, content FROM chat_messages WHERE user_id=? AND id>? ORDER BY id ASC", (uid, last_id)
+            ).fetchall()]
+        if len(rows) < 40:
+            return
+        to_sum = rows[:-12]
+        convo = "\n".join("%s: %s" % ("Learner" if r["role"] == "user" else "Buddy", r["content"]) for r in to_sum)
+        old = (mem["summary"] if mem else "") or "(none)"
+        new_summary = deepseek_call(
+            [{"role": "system", "content": SUMMARY_SYSTEM},
+             {"role": "user", "content": "EXISTING NOTES:\n%s\n\nNEW CONVERSATION:\n%s" % (old, convo)}],
+            temperature=0.2, max_tokens=500, json_mode=False,
+        ).strip()
+        with db() as c:
+            c.execute(
+                "INSERT INTO chat_memory (user_id, summary, last_msg_id, updated) VALUES (?,?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET summary=excluded.summary, "
+                "last_msg_id=excluded.last_msg_id, updated=excluded.updated",
+                (uid, new_summary, to_sum[-1]["id"], int(time.time())),
+            )
+        sys.stderr.write("chat memory updated for user %s (%d msgs folded)\n" % (uid, len(to_sum)))
+    except Exception as e:
+        sys.stderr.write("summarize failed: %s\n" % e)
 
 
 # ---------- HTTP ----------
@@ -409,6 +523,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_shadow_score()
             if p == "/api/recordings":
                 return self.api_upload()
+            if p == "/api/chat/send":
+                return self.api_chat_send()
+            if p == "/api/chat/voice":
+                return self.api_chat_voice()
             m = re.match(r"^/api/rescore/(\d+)$", p)
             if m:
                 return self.api_rescore(int(m.group(1)))
@@ -417,6 +535,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.fail("server error: %s" % e, 500)
 
     def do_DELETE(self):
+        if self.qpath() == "/api/chat":
+            user = self.auth()
+            if not user:
+                return self.fail("unauthorized", 401)
+            with db() as c:
+                c.execute("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
+                c.execute("DELETE FROM chat_memory WHERE user_id=?", (user["id"],))
+            return self.send_json({"ok": True})
         m = re.match(r"^/api/recordings/(\d+)$", self.qpath())
         if not m:
             return self.fail("not found", 404)
@@ -482,6 +608,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.send_json({"items": [dict(r) for r in rows]})
             if p == "/api/tts":
                 return self.api_tts()
+            if p == "/api/chat/history":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                with db() as c:
+                    rows = c.execute(
+                        "SELECT id, ts, role, content, fix_json FROM chat_messages "
+                        "WHERE user_id=? ORDER BY id DESC LIMIT 100", (user["id"],)
+                    ).fetchall()
+                return self.send_json({"items": [dict(r) for r in reversed(rows)]})
             m = re.match(r"^/api/audio/(\d+)$", p)
             if m:
                 return self.api_audio(int(m.group(1)))
@@ -645,6 +781,57 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "ai": ai, "reason": reason, "asr": asr,
             "transcript": transcript, "wpm": wpm, "words": words, "fillers": fillers,
         })
+
+    # --- AI 对话 ---
+    def api_chat_send(self):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        if not DEEPSEEK_KEY:
+            return self.fail("服务器未配置 AI Key")
+        text = (self.body_json().get("text") or "").strip()[:2000]
+        if not text:
+            return self.fail("empty text")
+        try:
+            return self.send_json(chat_turn(user["id"], text))
+        except Exception as e:
+            sys.stderr.write("chat failed (user %s): %s\n" % (user["id"], e))
+            return self.fail("对话服务暂时不可用，请重试", 502)
+
+    def api_chat_voice(self):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        if not DEEPSEEK_KEY:
+            return self.fail("服务器未配置 AI Key")
+        if not whisper_available():
+            return self.fail("服务器未启用 Whisper")
+        blob = self.body_raw(limit=20_000_000)
+        if not blob:
+            return self.fail("empty audio")
+        mime = self.headers.get("Content-Type") or "audio/webm"
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".m4a" if "mp4" in mime else ".webm", delete=False) as f:
+            f.write(blob)
+            tmp = f.name
+        try:
+            text = transcribe_file(tmp)
+        except Exception as e:
+            return self.fail("transcribe failed: %s" % e, 500)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        if len(WORD_RE.findall(text)) < 1:
+            return self.send_json({"user_text": "", "reply": None, "fix": None})
+        try:
+            result = chat_turn(user["id"], text)
+        except Exception as e:
+            sys.stderr.write("chat failed (user %s): %s\n" % (user["id"], e))
+            return self.fail("对话服务暂时不可用，请重试", 502)
+        result["user_text"] = text
+        return self.send_json(result)
 
     # --- 补评：对已有转写但缺 AI 结果的录音重新评分 ---
     def api_rescore(self, rid):

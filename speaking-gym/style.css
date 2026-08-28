@@ -161,6 +161,27 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .toggle-row input { margin-top: 4px; transform: scale(1.2); accent-color: var(--accent); }
 .rec-user { color: var(--accent); font-weight: 700; }
 
+/* AI 对话 */
+.chat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.chat-box { max-height: 56vh; min-height: 260px; overflow-y: auto; background: #f8faf9; border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 12px 0; }
+.msg { display: flex; flex-direction: column; margin-bottom: 10px; }
+.msg.user { align-items: flex-end; }
+.msg.ai { align-items: flex-start; }
+.bubble { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.6; }
+.msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.msg.ai .bubble { background: #fff; border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.bubble.thinking { color: var(--muted); font-style: italic; }
+.msg .play-mini { margin-left: 8px; }
+.chat-fix { max-width: 82%; margin-top: 4px; background: var(--warn-bg); border-radius: 10px; padding: 7px 12px; font-size: 13px; }
+.chat-fix .cf-orig { color: var(--danger); text-decoration: line-through; text-decoration-thickness: 1px; }
+.chat-fix .cf-better { font-weight: 700; }
+.chat-fix .cf-why { color: var(--warn-ink); font-size: 12px; margin-top: 2px; }
+.chat-input { display: flex; gap: 8px; align-items: center; }
+.chat-input input { flex: 1; padding: 11px 14px; border: 1px solid var(--border); border-radius: 10px; font-size: 15px; font-family: inherit; }
+.chat-input input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.chat-input .btn { margin: 0; white-space: nowrap; }
+.btn.recording { background: var(--danger); animation: pulse 1.2s infinite; }
+
 /* 移动端适配 */
 @media (max-width: 640px) {
   header { padding: 10px 14px; flex-wrap: wrap; gap: 6px 12px; }

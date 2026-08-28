@@ -299,7 +299,7 @@ document.querySelectorAll("#tabs button").forEach((b) => {
     b.classList.add("active");
     stopAllRec(); discardRecording(); clearTimer(); speechSynthesis.cancel();
     if (!AUTH.user) return renderAuth();
-    ({ daily: renderDaily, phrases: renderPhrases, progress: renderProgress })[b.dataset.tab]();
+    ({ daily: renderDaily, chat: renderChat, phrases: renderPhrases, progress: renderProgress })[b.dataset.tab]();
   });
 });
 
@@ -591,11 +591,131 @@ function aiDetailHtml(ai) {
       </div>` : ""}`;
 }
 
-/* 范本朗读：事件委托，覆盖评分页/历史/广场所有位置 */
+/* 朗读按钮：事件委托，覆盖评分页/历史/广场/对话所有位置 */
 document.addEventListener("click", (e) => {
-  const b = e.target.closest(".model-play");
+  const b = e.target.closest(".model-play, .msg-play");
   if (b) speak(decodeURIComponent(b.dataset.text));
 });
+
+/* ============ Tab：AI 对话（带长期记忆的陪聊） ============ */
+let chatBusy = false;
+function chatBubble(role, content, fix) {
+  if (role === "user") return `<div class="msg user"><div class="bubble">${esc(content)}</div></div>`;
+  return `
+    <div class="msg ai">
+      <div class="bubble">${esc(content)}<button class="play-mini msg-play" data-text="${encodeURIComponent(content)}">朗读</button></div>
+      ${fix ? `<div class="chat-fix"><span class="cf-orig">${esc(fix.original || "")}</span> → <span class="cf-better">${esc(fix.better || "")}</span>${fix.why_zh ? `<div class="cf-why">${esc(fix.why_zh)}</div>` : ""}</div>` : ""}
+    </div>`;
+}
+
+async function renderChat() {
+  if (!AUTH.user) return renderAuth();
+  view.innerHTML = `
+    <div class="card">
+      <div class="chat-head">
+        <div>
+          <h2>AI 对话 · Buddy</h2>
+          <p class="desc">不限时的自由聊天，不计入每日打卡。Buddy 有长期记忆——你们聊过的事、你的名字和近况它都记得，隔几天回来接着聊也没问题。</p>
+        </div>
+        <button class="link-btn" id="chatClear">清空对话与记忆</button>
+      </div>
+      <div class="chat-box" id="chatBox"><p class="desc">加载中……</p></div>
+      <div class="chat-input">
+        <button class="btn" id="btnTalk">按一下说话</button>
+        <input id="chatText" placeholder="或者打字…（Enter 发送）" autocomplete="off">
+        <button class="btn secondary" id="btnSend">发送</button>
+      </div>
+      <div class="muted-sm" id="chatHint">语音：点「按一下说话」开始，说完停顿 2 秒自动发送；再点一下可手动结束。</div>
+    </div>`;
+  const box = () => $("#chatBox");
+  const scrollDown = () => { const b = box(); if (b) b.scrollTop = b.scrollHeight; };
+  const append = (html) => { const b = box(); if (!b) return; b.insertAdjacentHTML("beforeend", html); scrollDown(); };
+
+  $("#chatClear").onclick = async () => {
+    if (!confirm("确定清空所有对话记录和 Buddy 的记忆吗？此操作不可恢复。")) return;
+    try { await api("/api/chat", { method: "DELETE" }); renderChat(); } catch (e) { alert("清空失败：" + e.message); }
+  };
+
+  try {
+    const h = await api("/api/chat/history");
+    if (!box()) return;
+    box().innerHTML = h.items.length
+      ? h.items.map((m) => {
+          let fix = null;
+          try { fix = m.fix_json ? JSON.parse(m.fix_json) : null; } catch (_) {}
+          return chatBubble(m.role, m.content, fix);
+        }).join("")
+      : chatBubble("ai", "Hey! I'm Buddy, your English chat partner. Tell me about your day — or anything on your mind. What's up?", null);
+    scrollDown();
+  } catch (e) {
+    if (box()) box().innerHTML = `<p class="desc">历史加载失败：${esc(e.message)}</p>`;
+  }
+
+  async function handleReply(promise, placeholderId) {
+    try {
+      const resp = await promise;
+      const ph = document.getElementById(placeholderId);
+      if (resp.user_text === "") {
+        if (ph) ph.remove();
+        const hint = $("#chatHint");
+        if (hint) hint.textContent = "没有听清，请再试一次（离麦克风近一点）。";
+        return;
+      }
+      if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null);
+      else if (ph) ph.remove();
+      append(chatBubble("ai", resp.reply, resp.fix));
+      speak(resp.reply);
+    } catch (e) {
+      const ph = document.getElementById(placeholderId);
+      if (ph) ph.outerHTML = `<div class="msg ai"><div class="bubble">（${esc(e.message)}）</div></div>`;
+    } finally {
+      chatBusy = false;
+    }
+  }
+
+  const sendText = () => {
+    const input = $("#chatText");
+    const text = input.value.trim();
+    if (!text || chatBusy) return;
+    chatBusy = true;
+    input.value = "";
+    append(chatBubble("user", text, null));
+    const pid = "ph" + Date.now();
+    append(`<div class="msg ai" id="${pid}"><div class="bubble thinking">Buddy 正在输入…</div></div>`);
+    handleReply(api("/api/chat/send", { json: { text } }), pid);
+  };
+  $("#btnSend").onclick = sendText;
+  $("#chatText").addEventListener("keydown", (e) => { if (e.key === "Enter") sendText(); });
+
+  let talking = false;
+  let finishTalk = null;
+  $("#btnTalk").onclick = async () => {
+    if (chatBusy) return;
+    if (talking) { if (finishTalk) finishTalk(); return; }
+    const recOk = await startRecording();
+    if (!recOk) { alert("无法使用麦克风，请在浏览器地址栏允许麦克风权限。"); return; }
+    talking = true;
+    const btn = $("#btnTalk");
+    btn.textContent = "说完了（停顿 2 秒自动发送）";
+    btn.classList.add("recording");
+    let done = false;
+    finishTalk = async () => {
+      if (done) return;
+      done = true;
+      talking = false;
+      stopVad();
+      const blob = await stopRecording();
+      const b2 = $("#btnTalk");
+      if (b2) { b2.textContent = "按一下说话"; b2.classList.remove("recording"); }
+      if (!blob) return;
+      chatBusy = true;
+      const pid = "ph" + Date.now();
+      append(`<div class="msg user" id="${pid}"><div class="bubble thinking">（识别中…）</div></div>`);
+      handleReply(api("/api/chat/voice", { method: "POST", blob, mime: blob.type }), pid);
+    };
+    startVad(recorder.stream, finishTalk, { maxMs: 60000 });
+  };
+}
 
 function renderAiBox(resp) {
   const box = $("#aiBox");
