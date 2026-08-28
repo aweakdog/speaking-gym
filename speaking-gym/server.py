@@ -325,7 +325,10 @@ def deepseek_call(messages, temperature=0.3, max_tokens=900, json_mode=True):
         try:
             with urllib.request.urlopen(req, timeout=90) as r:
                 resp = json.load(r)
-            return resp["choices"][0]["message"]["content"]
+            choice = resp["choices"][0]
+            if choice.get("finish_reason") == "length":
+                sys.stderr.write("deepseek reply truncated by max_tokens=%s\n" % max_tokens)
+            return choice["message"]["content"]
         except Exception as e:
             sys.stderr.write("deepseek attempt %d failed: %s\n" % (attempt + 1, e))
             if attempt == 1:
@@ -379,8 +382,10 @@ STRICT_CHECK_SYSTEM = (
 CHAT_SYSTEM_TMPL = (
     "You are Buddy, a warm, witty English conversation partner and speaking coach for a Chinese intermediate learner "
     "(CEFR B1-B2). Rules:\n"
-    "1. Reply in natural spoken English, 2-4 short sentences. Ask at most ONE follow-up question, digging into what "
-    "they actually said. Be genuinely curious.\n"
+    "1. Reply in natural spoken English, 2-4 short sentences, so the learner does most of the talking. Exception: "
+    "when they explicitly ask for a story, an explanation or an example, you may go up to ~180 words — but always "
+    "finish your last sentence. Ask at most ONE follow-up question, digging into what they actually said. "
+    "Be genuinely curious.\n"
     "2. Use the MEMORY notes to stay consistent and personal: reference their name, job, plans and past "
     "conversations naturally when relevant, like a friend who remembers.\n"
     "3. Keep vocabulary mostly B1-B2, but occasionally drop ONE vivid idiomatic expression worth learning.\n"
@@ -425,6 +430,13 @@ def parse_chat_json(content):
                 return json.loads(m.group(0))
             except Exception:
                 pass
+        # JSON 被截断时，抢救出 reply 字符串已生成的部分
+        m = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)', content)
+        if m:
+            try:
+                return {"reply": json.loads('"' + m.group(1) + '"'), "fix": None}
+            except Exception:
+                return {"reply": m.group(1), "fix": None}
     sys.stderr.write("chat json fallback, raw head: %r\n" % content[:200])
     return {"reply": content, "fix": None}
 
@@ -448,7 +460,7 @@ def chat_turn(uid, text, channel="text", typed_note=None):
         else:
             msgs.append({"role": "user", "content": tag_user_content(m["content"], m["channel"] or "text", m["typed_note"])})
     msgs.append({"role": "user", "content": tag_user_content(text, channel, typed_note)})
-    data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=600))
+    data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=1000))
     reply = str(data.get("reply", "")).strip() or "Sorry, could you say that again?"
     fix = data.get("fix") or None
     if level == "strict" and not fix:
@@ -700,7 +712,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not user:
             return self.fail("unauthorized", 401)
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        text = (q.get("text") or [""])[0].strip()[:300]
+        text = (q.get("text") or [""])[0].strip()
+        if len(text) > 2000:  # 超长时在句子边界截断，避免读到一半戛然而止
+            cut = text[:2000]
+            m2 = re.search(r"^.*[.!?…]", cut, re.S)
+            text = m2.group(0) if m2 else cut
         if not text:
             return self.fail("missing text")
         voice = TTS_VOICES.get((q.get("voice") or ["aria"])[0], TTS_VOICES["aria"])
