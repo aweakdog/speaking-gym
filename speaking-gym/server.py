@@ -37,6 +37,13 @@ DEEPSEEK_KEY = CONFIG.get("deepseek_api_key") or os.environ.get("DEEPSEEK_API_KE
 QWEN_KEY = CONFIG.get("qwen_api_key") or CONFIG.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
 QWEN_BASE = CONFIG.get("qwen_base_url") or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 QWEN_VISION_MODEL = CONFIG.get("qwen_vision_model") or "qwen3.8-flash"
+DEEPSEEK_VISION_MODEL = CONFIG.get("deepseek_vision_model") or "deepseek-v4-flash-vision-exp"
+# 视觉提供商：默认 deepseek（与文本共用一个账号）；配置 vision_provider="qwen" 可切回千问
+VISION_PROVIDER = (CONFIG.get("vision_provider") or ("deepseek" if DEEPSEEK_KEY else ("qwen" if QWEN_KEY else ""))).lower()
+
+
+def vision_available():
+    return (VISION_PROVIDER == "deepseek" and bool(DEEPSEEK_KEY)) or (VISION_PROVIDER == "qwen" and bool(QWEN_KEY))
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
 FORBIDDEN_STATIC = re.compile(r"(^|/)(data(/|$)|[^/]*\.(pem|db|log)$|run\.sh$|start\.sh$)")
@@ -413,10 +420,11 @@ CHAT_SYSTEM_TMPL = (
     "name that appears in [typed keywords], assume they mean that name). [typed] alone means the whole message was "
     "typed. NEVER echo these tags in your reply, and never correct the [typed keywords] content.\n"
     "7. Photos: [photo attached] means the learner sent a photo with that caption. If a [photo content] line is "
-    "present, it is a factual description from a vision model — you may treat it as what the photo shows and react "
-    "to specific details in it. If there is no [photo content] line, you cannot see the image; never pretend you "
-    "can — engage with their caption instead. Either way, ask ONE question that pushes them to describe the photo "
-    "in richer English (colors, people, place, the story behind it).\n"
+    "present, it is a factual description from a vision model — treat it as what the photo actually shows and react "
+    "to specific details in it (including mismatches with their caption). If there is NO [photo content] line, you "
+    "can NOT see the image at all: say so naturally (e.g. 'the photo isn't loading for me'), NEVER invent or imply "
+    "any visual detail, and instead ask them to describe it. Either way, ask ONE question that pushes them to "
+    "describe the photo in richer English (colors, people, place, the story behind it).\n"
     'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or null}}'
 )
 
@@ -433,31 +441,32 @@ def tag_user_content(content, channel, typed_note, photo_desc=None):
     return base
 
 
-# ---------- 千问视觉模型（可选：配置 qwen_api_key 后，Buddy 就能"看见"图片） ----------
-def qwen_vision_describe(path, mime, caption):
+# ---------- 视觉模型（deepseek-v4-flash-vision-exp / qwen3.8-flash，可配置切换） ----------
+def vision_describe(path, mime, caption):
     import base64
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    body = {
-        "model": QWEN_VISION_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime or "image/jpeg", b64)}},
-                {"type": "text", "text": (
-                    "Describe this photo factually in English, 50-90 words: scene, people (count, not identity), "
-                    "objects, any visible text (transcribe it), food, weather, mood. The photo owner's caption for "
-                    "context: %s" % (caption or "(none)")
-                )},
-            ],
-        }],
-        "max_tokens": 300,
-        "enable_thinking": False,
-    }
+    content = [
+        {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime or "image/jpeg", b64)}},
+        {"type": "text", "text": (
+            "Describe this photo factually in 2-4 English sentences: scene, people (count only), objects, "
+            "any visible text (transcribe it), food, mood. Caption from the photo owner for context: %s"
+            % (caption or "(none)")
+        )},
+    ]
+    if VISION_PROVIDER == "deepseek":
+        url = "https://api.deepseek.com/chat/completions"
+        key = DEEPSEEK_KEY
+        body = {"model": DEEPSEEK_VISION_MODEL, "messages": [{"role": "user", "content": content}],
+                "max_tokens": 400, "thinking": {"type": "disabled"}}  # 实验版默认思考，必须显式关闭
+    else:
+        url = QWEN_BASE + "/chat/completions"
+        key = QWEN_KEY
+        body = {"model": QWEN_VISION_MODEL, "messages": [{"role": "user", "content": content}],
+                "max_tokens": 400, "enable_thinking": False}
     req = urllib.request.Request(
-        QWEN_BASE + "/chat/completions",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + QWEN_KEY},
+        url, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
     )
     with urllib.request.urlopen(req, timeout=60) as r:
         resp = json.load(r)
@@ -587,9 +596,9 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             photo = c.execute("SELECT * FROM photos WHERE id=? AND user_id=?", (int(photo_id), uid)).fetchone()
         if photo:
             photo_desc = ""
-            if QWEN_KEY:
+            if vision_available():
                 try:
-                    photo_desc = qwen_vision_describe(
+                    photo_desc = vision_describe(
                         os.path.join(PHOTO_DIR, photo["path"]), photo["mime"], text)
                 except Exception as e:
                     sys.stderr.write("vision failed: %s\n" % e)
@@ -1420,7 +1429,7 @@ def main():
     else:
         print("Whisper: not installed, falling back to browser transcripts")
     threading.Thread(target=auto_organize_loop, daemon=True).start()
-    print("Vision (%s): %s" % (QWEN_VISION_MODEL, "on" if QWEN_KEY else "off — set qwen_api_key in config.json to enable"))
+    print("Vision: %s" % ((VISION_PROVIDER + " / " + (DEEPSEEK_VISION_MODEL if VISION_PROVIDER == "deepseek" else QWEN_VISION_MODEL)) if vision_available() else "off"))
     handler = functools.partial(Handler, directory=BASE)
     cert, key = os.path.join(BASE, "cert.pem"), os.path.join(BASE, "key.pem")
     if os.path.exists(cert) and os.path.exists(key):
