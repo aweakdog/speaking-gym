@@ -316,7 +316,7 @@ document.querySelectorAll("#tabs button").forEach((b) => {
     b.classList.add("active");
     stopAllRec(); discardRecording(); clearTimer(); speechSynthesis.cancel();
     if (!AUTH.user) return renderAuth();
-    ({ daily: renderDaily, chat: renderChat, gallery: renderGallery, phrases: renderPhrases, progress: renderProgress })[b.dataset.tab]();
+    ({ daily: renderDaily, chat: renderChat, memory: renderMemory, phrases: renderPhrases, progress: renderProgress })[b.dataset.tab]();
   });
 });
 
@@ -662,7 +662,7 @@ async function renderChat() {
               <option value="strict">严格</option>
             </select>
           </label>
-          <button class="link-btn" id="chatClear">清空对话与记忆</button>
+          <button class="link-btn" id="chatClear">清空对话</button>
         </div>
       </div>
       <div class="chat-box" id="chatBox"><p class="desc">加载中……</p></div>
@@ -681,8 +681,15 @@ async function renderChat() {
   const append = (html) => { const b = box(); if (!b) return; b.insertAdjacentHTML("beforeend", html); scrollDown(); };
 
   $("#chatClear").onclick = async () => {
-    if (!confirm("确定清空所有对话记录和 Buddy 的记忆吗？此操作不可恢复。")) return;
-    try { await api("/api/chat", { method: "DELETE" }); renderChat(); } catch (e) { alert("清空失败：" + e.message); }
+    const pw = prompt(
+      "清空对话（短期记忆）：\nBuddy 会先自动把重要信息提炼进长期记忆（可在「长期记忆」页查看），然后删除全部对话记录。\n\n请输入登录密码确认："
+    );
+    if (!pw) return;
+    try {
+      const r = await api("/api/chat", { method: "DELETE", json: { password: pw } });
+      alert(r.memory_kept ? "对话已清空，长期记忆已提炼保留。" : "对话已清空。");
+      renderChat();
+    } catch (e) { alert("清空失败：" + e.message); }
   };
 
   const fixSel = $("#fixLevel");
@@ -870,13 +877,58 @@ async function renderChat() {
   };
 }
 
-/* ============ Tab：图库 ============ */
-async function renderGallery() {
+/* ============ Tab：长期记忆（记忆笔记 + 图库） ============ */
+let memSub = "notes";
+async function renderMemory() {
   if (!AUTH.user) return renderAuth();
-  view.innerHTML = `<div class="card"><p class="desc">加载中……</p></div>`;
+  view.innerHTML = `
+    <div class="card">
+      <h2>长期记忆</h2>
+      <p class="desc">Buddy 关于你的持久记忆：对话攒多了自动归纳；清空对话时也会先提炼保留。图库照片同属长期记忆，不受对话清空影响。</p>
+      <div class="pill-row">
+        <button class="pill ${memSub === "notes" ? "active" : ""}" data-sub="notes">记忆笔记</button>
+        <button class="pill ${memSub === "gallery" ? "active" : ""}" data-sub="gallery">图库</button>
+      </div>
+      <div id="memBody"><p class="desc">加载中……</p></div>
+    </div>`;
+  view.querySelectorAll(".pill[data-sub]").forEach((p) => {
+    p.onclick = () => { memSub = p.dataset.sub; renderMemory(); };
+  });
+  if (memSub === "notes") renderMemoryNotes($("#memBody"));
+  else renderGalleryInto($("#memBody"));
+}
+
+async function renderMemoryNotes(root) {
+  let d;
+  try { d = await api("/api/memory"); } catch (e) {
+    root.innerHTML = `<p class="desc">加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+  const t = d.updated ? new Date(d.updated * 1000).toLocaleString("zh-CN") : null;
+  root.innerHTML = `
+    ${d.summary
+      ? `<div class="mem-notes">${esc(d.summary)}</div>
+         <p class="muted-sm">最近更新：${t || "—"} · 这份笔记由 AI 自动维护，Buddy 每轮对话都会参考它。</p>`
+      : `<p class="desc">还没有长期记忆。多和 Buddy 聊聊，它会自动记下关于你的重要信息（名字、生活、计划、常犯的错误……）。</p>`}
+    <div style="margin-top:18px">
+      <button class="btn secondary danger-btn" id="btnWipeMem">彻底抹除长期记忆与全部对话</button>
+      <p class="muted-sm">需输入密码确认；图库照片不受影响。抹除后 Buddy 将完全不认识你。</p>
+    </div>`;
+  $("#btnWipeMem").onclick = async () => {
+    const pw = prompt("危险操作：彻底抹除 Buddy 的长期记忆和全部对话（图库照片保留）。此操作不可恢复！\n\n请输入登录密码确认：");
+    if (!pw) return;
+    try {
+      await api("/api/memory", { method: "DELETE", json: { password: pw } });
+      alert("已彻底抹除。");
+      renderMemory();
+    } catch (e) { alert("操作失败：" + e.message); }
+  };
+}
+
+async function renderGalleryInto(root) {
   let d;
   try { d = await api("/api/photos"); } catch (e) {
-    view.innerHTML = `<div class="card"><p class="desc">加载失败：${esc(e.message)}</p></div>`;
+    root.innerHTML = `<p class="desc">加载失败：${esc(e.message)}</p>`;
     return;
   }
   const items = d.items || [];
@@ -887,34 +939,29 @@ async function renderGallery() {
     groups.get(key).push(p);
   }
   const ordered = [...groups.entries()].sort((a, b) => (a[0] === "未整理" ? -1 : b[0] === "未整理" ? 1 : 0));
-  view.innerHTML = `
-    <div class="card">
-      <div class="chat-head">
-        <div>
-          <h2>图库（${items.length} 张）</h2>
-          <p class="desc">在「AI 对话」里点「图」发照片，Buddy 会和你聊它，并自动打标签存到这里。未整理照片攒够 8 张后每天会自动归纳成相册，也可以手动整理。</p>
-        </div>
-        <button class="btn secondary" id="btnOrganize" ${items.length < 4 ? "disabled" : ""}>AI 整理图库</button>
-      </div>
-      <div id="orgMsg" class="muted-sm"></div>
-      ${items.length ? ordered.map(([album, ps]) => `
-        <h2 style="margin-top:18px">${esc(album)}（${ps.length}）</h2>
-        <div class="photo-grid">
-          ${ps.map((p) => {
-            let tags = [];
-            try { tags = p.tags_json ? JSON.parse(p.tags_json) : []; } catch (_) {}
-            return `
-            <div class="photo-card">
-              <img src="/api/photo/${p.id}?t=${encodeURIComponent(AUTH.token)}" loading="lazy" data-open="${p.id}" alt="">
-              <div class="photo-meta">
-                <span class="photo-date">${p.date}</span>
-                <button class="note-del photo-del" data-id="${p.id}">删除</button>
-              </div>
-              ${tags.length ? `<div class="photo-tags">${tags.map((t) => `<span class="tag-chip">${esc(t)}</span>`).join("")}</div>` : `<div class="photo-tags"><span class="tag-chip">标签生成中…</span></div>`}
-            </div>`;
-          }).join("")}
-        </div>`).join("") : `<p class="desc" style="margin-top:14px">还没有照片。去「AI 对话」发第一张吧。</p>`}
-    </div>`;
+  root.innerHTML = `
+    <div class="chat-head">
+      <p class="desc" style="margin:0">共 ${items.length} 张。在「AI 对话」里点「图」发照片，Buddy 会和你聊它并自动打标签存到这里。未整理照片攒够 8 张后每天自动归纳成相册，也可手动整理。</p>
+      <button class="btn secondary" id="btnOrganize" ${items.length < 4 ? "disabled" : ""}>AI 整理图库</button>
+    </div>
+    <div id="orgMsg" class="muted-sm"></div>
+    ${items.length ? ordered.map(([album, ps]) => `
+      <h2 style="margin-top:16px">${esc(album)}（${ps.length}）</h2>
+      <div class="photo-grid">
+        ${ps.map((p) => {
+          let tags = [];
+          try { tags = p.tags_json ? JSON.parse(p.tags_json) : []; } catch (_) {}
+          return `
+          <div class="photo-card">
+            <img src="/api/photo/${p.id}?t=${encodeURIComponent(AUTH.token)}" loading="lazy" data-open="${p.id}" alt="">
+            <div class="photo-meta">
+              <span class="photo-date">${p.date}</span>
+              <button class="note-del photo-del" data-id="${p.id}">删除</button>
+            </div>
+            ${tags.length ? `<div class="photo-tags">${tags.map((t) => `<span class="tag-chip">${esc(t)}</span>`).join("")}</div>` : `<div class="photo-tags"><span class="tag-chip">标签生成中…</span></div>`}
+          </div>`;
+        }).join("")}
+      </div>`).join("") : `<p class="desc" style="margin-top:14px">还没有照片。去「AI 对话」发第一张吧。</p>`}`;
   $("#btnOrganize").onclick = async () => {
     const btn = $("#btnOrganize");
     btn.disabled = true;
@@ -922,20 +969,20 @@ async function renderGallery() {
     try {
       const r = await api("/api/photos/organize", { method: "POST", json: {} });
       $("#orgMsg").textContent = `已把 ${r.organized} 张照片整理进 ${r.albums.length} 个相册。`;
-      setTimeout(renderGallery, 800);
+      setTimeout(renderMemory, 800);
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "AI 整理图库";
       $("#orgMsg").textContent = "整理失败：" + e.message;
     }
   };
-  view.querySelectorAll("[data-open]").forEach((img) => {
+  root.querySelectorAll("[data-open]").forEach((img) => {
     img.onclick = () => window.open(img.src, "_blank");
   });
-  view.querySelectorAll(".photo-del").forEach((b) => {
+  root.querySelectorAll(".photo-del").forEach((b) => {
     b.onclick = async () => {
       if (!confirm("删除这张照片？")) return;
-      try { await api(`/api/photos/${b.dataset.id}`, { method: "DELETE" }); renderGallery(); }
+      try { await api(`/api/photos/${b.dataset.id}`, { method: "DELETE" }); renderMemory(); }
       catch (e) { alert("删除失败：" + e.message); }
     };
   });

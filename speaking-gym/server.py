@@ -648,6 +648,36 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
     return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None}
 
 
+def check_password(user, pw):
+    return bool(pw) and hash_pw(pw, user["salt"]) == user["pw_hash"]
+
+
+def distill_memory(uid):
+    """清空对话前调用：把现有笔记 + 未归纳的消息提炼成新的长期记忆。"""
+    with db() as c:
+        mem = c.execute("SELECT * FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
+        last_id = mem["last_msg_id"] if mem else 0
+        rows = [dict(r) for r in c.execute(
+            "SELECT role, content, typed_note FROM chat_messages WHERE user_id=? AND id>? ORDER BY id ASC LIMIT 150",
+            (uid, last_id)
+        ).fetchall()]
+    old = (mem["summary"] if mem else "") or ""
+    if not rows:
+        return old or None
+    convo = "\n".join(
+        "%s: %s%s" % (
+            "Learner" if r["role"] == "user" else "Buddy",
+            r["content"],
+            (" (typed: %s)" % r["typed_note"]) if r.get("typed_note") else "",
+        ) for r in rows
+    )
+    return deepseek_call(
+        [{"role": "system", "content": SUMMARY_SYSTEM},
+         {"role": "user", "content": "EXISTING NOTES:\n%s\n\nNEW CONVERSATION:\n%s" % (old or "(none)", convo)}],
+        temperature=0.2, max_tokens=500, json_mode=False,
+    ).strip()
+
+
 def maybe_summarize(uid):
     """未摘要消息超过 40 条时，把较早的部分并入长期记忆笔记。"""
     try:
@@ -794,9 +824,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         if self.qpath() == "/api/chat":
+            # 清空对话（短期记忆）：先提炼长期记忆，需密码确认
             user = self.auth()
             if not user:
                 return self.fail("unauthorized", 401)
+            if not check_password(user, self.body_json().get("password") or ""):
+                return self.fail("密码错误", 403)
+            summary = None
+            if DEEPSEEK_KEY:
+                try:
+                    summary = distill_memory(user["id"])
+                except Exception as e:
+                    return self.fail("长期记忆提炼失败，已取消清空（数据未动）：%s" % e, 502)
+            with db() as c:
+                c.execute("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
+                if summary:
+                    c.execute(
+                        "INSERT INTO chat_memory (user_id, summary, last_msg_id, updated) VALUES (?,?,0,?) "
+                        "ON CONFLICT(user_id) DO UPDATE SET summary=excluded.summary, last_msg_id=0, "
+                        "updated=excluded.updated",
+                        (user["id"], summary, int(time.time())),
+                    )
+                else:
+                    c.execute("UPDATE chat_memory SET last_msg_id=0 WHERE user_id=?", (user["id"],))
+            return self.send_json({"ok": True, "memory_kept": bool(summary)})
+        if self.qpath() == "/api/memory":
+            # 彻底抹除长期记忆 + 全部对话（图库不动），需密码确认
+            user = self.auth()
+            if not user:
+                return self.fail("unauthorized", 401)
+            if not check_password(user, self.body_json().get("password") or ""):
+                return self.fail("密码错误", 403)
             with db() as c:
                 c.execute("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
                 c.execute("DELETE FROM chat_memory WHERE user_id=?", (user["id"],))
@@ -884,6 +942,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.send_json({"items": [dict(r) for r in rows]})
             if p == "/api/tts":
                 return self.api_tts()
+            if p == "/api/memory":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                with db() as c:
+                    mem = c.execute("SELECT summary, updated FROM chat_memory WHERE user_id=?", (user["id"],)).fetchone()
+                return self.send_json({
+                    "summary": (mem["summary"] if mem else "") or "",
+                    "updated": mem["updated"] if mem else None,
+                })
             if p == "/api/chat/history":
                 user = self.auth()
                 if not user:
