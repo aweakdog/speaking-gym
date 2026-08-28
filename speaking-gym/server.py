@@ -582,6 +582,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         p = self.qpath()
         if p.startswith("/api/"):
             return self.api_get(p)
+        if p == "/cert":  # 下载自签名证书（公钥，供 iPhone/Mac 安装信任）
+            fp = os.path.join(BASE, "cert.pem")
+            if not os.path.exists(fp):
+                return self.fail("not found", 404)
+            with open(fp, "rb") as f:
+                raw = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-x509-ca-cert")
+            self.send_header("Content-Disposition", 'attachment; filename="speaking-gym.crt"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if FORBIDDEN_STATIC.search(p):
             return self.fail("not found", 404)
         return super().do_GET()
@@ -1079,6 +1092,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 1511
     init_db()
+    http.server.SimpleHTTPRequestHandler.extensions_map[".webmanifest"] = "application/manifest+json"
     if whisper_available():
         threading.Thread(target=warm_whisper, daemon=True).start()
         print("Whisper: enabled, warming up model '%s'" % os.environ.get("SG_WHISPER_MODEL", "small"))
