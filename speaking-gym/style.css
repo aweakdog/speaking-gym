@@ -173,6 +173,7 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .msg.ai .bubble { background: #fff; border: 1px solid var(--border); border-bottom-left-radius: 4px; }
 .bubble.thinking { color: var(--muted); font-style: italic; }
 .msg .play-mini { margin-left: 8px; }
+.typed-note { max-width: 82%; margin-top: 4px; background: var(--accent-soft); color: var(--accent); border-radius: 10px; padding: 6px 12px; font-size: 12.5px; }
 .chat-fix { max-width: 82%; margin-top: 4px; background: var(--warn-bg); border-radius: 10px; padding: 7px 12px; font-size: 13px; }
 .chat-fix .cf-orig { color: var(--danger); text-decoration: line-through; text-decoration-thickness: 1px; }
 .chat-fix .cf-better { font-weight: 700; }

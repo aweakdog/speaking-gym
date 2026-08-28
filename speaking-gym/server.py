@@ -86,6 +86,11 @@ def init_db():
         ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
         if "chat_fix_level" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN chat_fix_level TEXT DEFAULT 'standard'")
+        ccols = [r[1] for r in c.execute("PRAGMA table_info(chat_messages)")]
+        if "channel" not in ccols:
+            c.execute("ALTER TABLE chat_messages ADD COLUMN channel TEXT")
+        if "typed_note" not in ccols:
+            c.execute("ALTER TABLE chat_messages ADD COLUMN typed_note TEXT")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -381,8 +386,21 @@ CHAT_SYSTEM_TMPL = (
     "3. Keep vocabulary mostly B1-B2, but occasionally drop ONE vivid idiomatic expression worth learning.\n"
     "{fix_rule}\n"
     "5. Never lecture, never write essays. Keep it flowing like a real chat.\n"
+    "6. Input channel tags: learner messages may start with [spoken] (voice via speech recognition — names and rare "
+    "words may be garbled) and may include a [typed keywords] line (exact spellings the learner typed: treat these "
+    "as the authoritative names/terms, and use them to interpret the spoken part — e.g. if the spoken text garbled a "
+    "name that appears in [typed keywords], assume they mean that name). [typed] alone means the whole message was "
+    "typed. NEVER echo these tags in your reply, and never correct the [typed keywords] content.\n"
     'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or null}}'
 )
+
+
+def tag_user_content(content, channel, typed_note):
+    if channel == "voice":
+        return "[spoken] " + content
+    if channel == "mixed":
+        return "[spoken] %s\n[typed keywords] %s" % (content, typed_note or "")
+    return "[typed] " + content
 
 SUMMARY_SYSTEM = (
     "You maintain long-term memory notes about an English learner, based on their chats with an AI partner. "
@@ -411,12 +429,13 @@ def parse_chat_json(content):
     return {"reply": content, "fix": None}
 
 
-def chat_turn(uid, text):
+def chat_turn(uid, text, channel="text", typed_note=None):
     with db() as c:
         mem = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
         urow = c.execute("SELECT chat_fix_level FROM users WHERE id=?", (uid,)).fetchone()
         recent = [dict(r) for r in c.execute(
-            "SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 16", (uid,)
+            "SELECT role, content, channel, typed_note FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 16",
+            (uid,)
         ).fetchall()][::-1]
     level = (urow["chat_fix_level"] if urow else None) or "standard"
     system = CHAT_SYSTEM_TMPL.format(fix_rule=FIX_RULES.get(level, FIX_RULES["standard"]))
@@ -427,8 +446,8 @@ def chat_turn(uid, text):
             # 历史 assistant 消息统一还原成 JSON 形态，与要求的输出格式保持一致
             msgs.append({"role": "assistant", "content": json.dumps({"reply": m["content"]}, ensure_ascii=False)})
         else:
-            msgs.append({"role": "user", "content": m["content"]})
-    msgs.append({"role": "user", "content": text})
+            msgs.append({"role": "user", "content": tag_user_content(m["content"], m["channel"] or "text", m["typed_note"])})
+    msgs.append({"role": "user", "content": tag_user_content(text, channel, typed_note)})
     data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=600))
     reply = str(data.get("reply", "")).strip() or "Sorry, could you say that again?"
     fix = data.get("fix") or None
@@ -444,7 +463,10 @@ def chat_turn(uid, text):
             sys.stderr.write("strict check failed: %s\n" % e)
     now = int(time.time() * 1000)
     with db() as c:
-        c.execute("INSERT INTO chat_messages (user_id, ts, role, content) VALUES (?,?,?,?)", (uid, now, "user", text))
+        c.execute(
+            "INSERT INTO chat_messages (user_id, ts, role, content, channel, typed_note) VALUES (?,?,?,?,?,?)",
+            (uid, now, "user", text, channel, typed_note),
+        )
         c.execute(
             "INSERT INTO chat_messages (user_id, ts, role, content, fix_json) VALUES (?,?,?,?,?)",
             (uid, now + 1, "assistant", reply, json.dumps(fix, ensure_ascii=False) if fix else None),
@@ -460,12 +482,19 @@ def maybe_summarize(uid):
             mem = c.execute("SELECT * FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
             last_id = mem["last_msg_id"] if mem else 0
             rows = [dict(r) for r in c.execute(
-                "SELECT id, role, content FROM chat_messages WHERE user_id=? AND id>? ORDER BY id ASC", (uid, last_id)
+                "SELECT id, role, content, typed_note FROM chat_messages WHERE user_id=? AND id>? ORDER BY id ASC",
+                (uid, last_id)
             ).fetchall()]
         if len(rows) < 40:
             return
         to_sum = rows[:-12]
-        convo = "\n".join("%s: %s" % ("Learner" if r["role"] == "user" else "Buddy", r["content"]) for r in to_sum)
+        convo = "\n".join(
+            "%s: %s%s" % (
+                "Learner" if r["role"] == "user" else "Buddy",
+                r["content"],
+                (" (typed: %s)" % r["typed_note"]) if r.get("typed_note") else "",
+            ) for r in to_sum
+        )
         old = (mem["summary"] if mem else "") or "(none)"
         new_summary = deepseek_call(
             [{"role": "system", "content": SUMMARY_SYSTEM},
@@ -654,7 +683,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self.fail("unauthorized", 401)
                 with db() as c:
                     rows = c.execute(
-                        "SELECT id, ts, role, content, fix_json FROM chat_messages "
+                        "SELECT id, ts, role, content, fix_json, channel, typed_note FROM chat_messages "
                         "WHERE user_id=? ORDER BY id DESC LIMIT 100", (user["id"],)
                     ).fetchall()
                 return self.send_json({"items": [dict(r) for r in reversed(rows)]})
@@ -836,7 +865,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not text:
             return self.fail("empty text")
         try:
-            return self.send_json(chat_turn(user["id"], text))
+            return self.send_json(chat_turn(user["id"], text, channel="text"))
         except Exception as e:
             sys.stderr.write("chat failed (user %s): %s\n" % (user["id"], e))
             return self.fail("对话服务暂时不可用，请重试", 502)
@@ -868,12 +897,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pass
         if len(WORD_RE.findall(text)) < 1:
             return self.send_json({"user_text": "", "reply": None, "fix": None})
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        note = (q.get("note") or [""])[0].strip()[:500]
         try:
-            result = chat_turn(user["id"], text)
+            result = chat_turn(user["id"], text, channel="mixed" if note else "voice", typed_note=note or None)
         except Exception as e:
             sys.stderr.write("chat failed (user %s): %s\n" % (user["id"], e))
             return self.fail("对话服务暂时不可用，请重试", 502)
         result["user_text"] = text
+        result["typed_note"] = note or None
         return self.send_json(result)
 
     # --- 补评：对已有转写但缺 AI 结果的录音重新评分 ---

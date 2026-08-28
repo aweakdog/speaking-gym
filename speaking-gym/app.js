@@ -608,8 +608,12 @@ document.addEventListener("click", (e) => {
 
 /* ============ Tab：AI 对话（带长期记忆的陪聊） ============ */
 let chatBusy = false;
-function chatBubble(role, content, fix) {
-  if (role === "user") return `<div class="msg user"><div class="bubble">${esc(content)}</div></div>`;
+function chatBubble(role, content, fix, typedNote) {
+  if (role === "user") return `
+    <div class="msg user">
+      <div class="bubble">${esc(content)}</div>
+      ${typedNote ? `<div class="typed-note">键入补充：${esc(typedNote)}</div>` : ""}
+    </div>`;
   return `
     <div class="msg ai">
       <div class="bubble">${esc(content)}<button class="play-mini msg-play" data-text="${encodeURIComponent(content)}">朗读</button></div>
@@ -640,10 +644,10 @@ async function renderChat() {
       <div class="chat-box" id="chatBox"><p class="desc">加载中……</p></div>
       <div class="chat-input">
         <button class="btn" id="btnTalk">按一下说话</button>
-        <input id="chatText" placeholder="或者打字…（Enter 发送）" autocomplete="off">
+        <input id="chatText" placeholder="打字发送；录音时在这里输入人名/地名等关键词，会随语音一起发出" autocomplete="off">
         <button class="btn secondary" id="btnSend">发送</button>
       </div>
-      <div class="muted-sm" id="chatHint">语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送——思考时慢慢想，继续说就不会被切断；着急的话再点一下按钮立即发送。</div>
+      <div class="muted-sm" id="chatHint">语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。提到 Buddy 可能不认识的人名地名？录音的同时把它们打进输入框，Buddy 会以你打的拼写为准。</div>
     </div>`;
   const box = () => $("#chatBox");
   const scrollDown = () => { const b = box(); if (b) b.scrollTop = b.scrollHeight; };
@@ -674,7 +678,7 @@ async function renderChat() {
       ? h.items.map((m) => {
           let fix = null;
           try { fix = m.fix_json ? JSON.parse(m.fix_json) : null; } catch (_) {}
-          return chatBubble(m.role, m.content, fix);
+          return chatBubble(m.role, m.content, fix, m.typed_note);
         }).join("")
       : chatBubble("ai", "Hey! I'm Buddy, your English chat partner. Tell me about your day — or anything on your mind. What's up?", null);
     scrollDown();
@@ -682,7 +686,7 @@ async function renderChat() {
     if (box()) box().innerHTML = `<p class="desc">历史加载失败：${esc(e.message)}</p>`;
   }
 
-  async function handleReply(promise, placeholderId) {
+  async function handleReply(promise, placeholderId, note) {
     try {
       const resp = await promise;
       const ph = document.getElementById(placeholderId);
@@ -690,21 +694,28 @@ async function renderChat() {
         if (ph) ph.remove();
         const hint = $("#chatHint");
         if (hint) hint.textContent = "没有听清，请再试一次（离麦克风近一点）。";
+        if (note) { const input = $("#chatText"); if (input && !input.value) input.value = note; }
         return;
       }
-      if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null);
+      if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null, resp.typed_note || note);
       else if (ph) ph.remove();
       append(chatBubble("ai", resp.reply, resp.fix));
       speak(resp.reply);
     } catch (e) {
       const ph = document.getElementById(placeholderId);
       if (ph) ph.outerHTML = `<div class="msg ai"><div class="bubble">（${esc(e.message)}）</div></div>`;
+      if (note) { const input = $("#chatText"); if (input && !input.value) input.value = note; }
     } finally {
       chatBusy = false;
     }
   }
 
   const sendText = () => {
+    if (talking) {
+      const hint = $("#chatHint");
+      if (hint) hint.textContent = "正在录音：输入框里的内容会作为关键词随这段语音一起发送，无需单独发。";
+      return;
+    }
     const input = $("#chatText");
     const text = input.value.trim();
     if (!text || chatBusy) return;
@@ -744,9 +755,13 @@ async function renderChat() {
       if (hintEl()) hintEl().textContent = "语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。";
       if (!blob) return;
       chatBusy = true;
+      const noteInput = $("#chatText");
+      const note = noteInput ? noteInput.value.trim() : "";
+      if (noteInput) noteInput.value = "";
       const pid = "ph" + Date.now();
       append(`<div class="msg user" id="${pid}"><div class="bubble thinking">（识别中…）</div></div>`);
-      handleReply(api("/api/chat/voice", { method: "POST", blob, mime: blob.type }), pid);
+      const url = "/api/chat/voice" + (note ? `?note=${encodeURIComponent(note)}` : "");
+      handleReply(api(url, { method: "POST", blob, mime: blob.type }), pid, note);
     };
     startVad(recorder.stream, finishTalk, {
       silenceMs: 3500,
