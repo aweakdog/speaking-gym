@@ -34,7 +34,9 @@ if os.path.exists(_cfg):
     with open(_cfg) as f:
         CONFIG = json.load(f)
 DEEPSEEK_KEY = CONFIG.get("deepseek_api_key") or os.environ.get("DEEPSEEK_API_KEY", "")
-DASHSCOPE_KEY = CONFIG.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
+QWEN_KEY = CONFIG.get("qwen_api_key") or CONFIG.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
+QWEN_BASE = CONFIG.get("qwen_base_url") or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+QWEN_VISION_MODEL = CONFIG.get("qwen_vision_model") or "qwen3.8-flash"
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
 FORBIDDEN_STATIC = re.compile(r"(^|/)(data(/|$)|[^/]*\.(pem|db|log)$|run\.sh$|start\.sh$)")
@@ -431,13 +433,13 @@ def tag_user_content(content, channel, typed_note, photo_desc=None):
     return base
 
 
-# ---------- 千问视觉模型（可选：配置 dashscope_api_key 后，Buddy 就能"看见"图片） ----------
+# ---------- 千问视觉模型（可选：配置 qwen_api_key 后，Buddy 就能"看见"图片） ----------
 def qwen_vision_describe(path, mime, caption):
     import base64
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
     body = {
-        "model": "qwen-vl-plus",
+        "model": QWEN_VISION_MODEL,
         "messages": [{
             "role": "user",
             "content": [
@@ -450,11 +452,12 @@ def qwen_vision_describe(path, mime, caption):
             ],
         }],
         "max_tokens": 300,
+        "enable_thinking": False,
     }
     req = urllib.request.Request(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        QWEN_BASE + "/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + DASHSCOPE_KEY},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + QWEN_KEY},
     )
     with urllib.request.urlopen(req, timeout=60) as r:
         resp = json.load(r)
@@ -464,7 +467,9 @@ def qwen_vision_describe(path, mime, caption):
 TAG_SYSTEM = (
     "You tag photos in a personal library. Given the owner's caption, an optional vision-model description and the "
     "chat reply, produce 3-8 short keyword tags (English words or Chinese, whichever fits: places, people/pets by "
-    "name if mentioned, activities, objects, food, mood). "
+    "name if mentioned, activities, objects, food, mood). The photo_description is the ACTUAL image content — when "
+    "it conflicts with the caption, trust the photo_description; use the caption only for names and context the "
+    "image cannot show. "
     'JSON ONLY: {"tags": ["...", "..."]}'
 )
 
@@ -582,7 +587,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             photo = c.execute("SELECT * FROM photos WHERE id=? AND user_id=?", (int(photo_id), uid)).fetchone()
         if photo:
             photo_desc = ""
-            if DASHSCOPE_KEY:
+            if QWEN_KEY:
                 try:
                     photo_desc = qwen_vision_describe(
                         os.path.join(PHOTO_DIR, photo["path"]), photo["mime"], text)
@@ -1347,7 +1352,7 @@ def main():
     else:
         print("Whisper: not installed, falling back to browser transcripts")
     threading.Thread(target=auto_organize_loop, daemon=True).start()
-    print("Vision (qwen-vl): %s" % ("on" if DASHSCOPE_KEY else "off — set dashscope_api_key in config.json to enable"))
+    print("Vision (%s): %s" % (QWEN_VISION_MODEL, "on" if QWEN_KEY else "off — set qwen_api_key in config.json to enable"))
     handler = functools.partial(Handler, directory=BASE)
     cert, key = os.path.join(BASE, "cert.pem"), os.path.join(BASE, "key.pem")
     if os.path.exists(cert) and os.path.exists(key):
