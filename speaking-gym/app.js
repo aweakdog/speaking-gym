@@ -115,6 +115,7 @@ function pickVoice() {
     || voices.find((v) => v.lang === "en-US") || voices[0];
 }
 let ttsAudio = null;
+/* 返回 Promise：朗读播放完毕（或失败）时 resolve —— 免提模式靠它衔接下一轮 */
 async function speak(text) {
   speechSynthesis.cancel();
   if (ttsAudio) { try { ttsAudio.pause(); } catch (_) {} ttsAudio = null; }
@@ -127,18 +128,25 @@ async function speak(text) {
       });
       if (res.ok) {
         const blob = await res.blob();
-        ttsAudio = new Audio(URL.createObjectURL(blob));
-        ttsAudio.play();
-        return;
+        return await new Promise((resolve) => {
+          ttsAudio = new Audio(URL.createObjectURL(blob));
+          ttsAudio.onended = () => resolve(true);
+          ttsAudio.onerror = () => resolve(false);
+          ttsAudio.play().catch(() => resolve(false));
+        });
       }
     } catch (_) {}
   }
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-US";
-  u.rate = parseFloat(rate);
-  const v = pickVoice();
-  if (v) u.voice = v;
-  speechSynthesis.speak(u);
+  return await new Promise((resolve) => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-US";
+    u.rate = parseFloat(rate);
+    const v = pickVoice();
+    if (v) u.voice = v;
+    u.onend = () => resolve(true);
+    u.onerror = () => resolve(false);
+    speechSynthesis.speak(u);
+  });
 }
 
 /* ============ 语音识别 ============ */
@@ -308,7 +316,7 @@ document.querySelectorAll("#tabs button").forEach((b) => {
     b.classList.add("active");
     stopAllRec(); discardRecording(); clearTimer(); speechSynthesis.cancel();
     if (!AUTH.user) return renderAuth();
-    ({ daily: renderDaily, chat: renderChat, phrases: renderPhrases, progress: renderProgress })[b.dataset.tab]();
+    ({ daily: renderDaily, chat: renderChat, gallery: renderGallery, phrases: renderPhrases, progress: renderProgress })[b.dataset.tab]();
   });
 });
 
@@ -608,10 +616,25 @@ document.addEventListener("click", (e) => {
 
 /* ============ Tab：AI 对话（带长期记忆的陪聊） ============ */
 let chatBusy = false;
-function chatBubble(role, content, fix, typedNote) {
+
+async function downscaleImage(file, maxDim = 1600) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+    if (scale >= 1 && file.type === "image/jpeg") return file;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bmp.width * scale);
+    canvas.height = Math.round(bmp.height * scale);
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+    return blob || file;
+  } catch (_) { return file; }
+}
+
+function chatBubble(role, content, fix, typedNote, photoSrc) {
   if (role === "user") return `
     <div class="msg user">
-      <div class="bubble">${esc(content)}</div>
+      <div class="bubble">${photoSrc ? `<img class="bubble-photo" src="${photoSrc}" alt="photo">` : ""}${esc(content)}</div>
       ${typedNote ? `<div class="typed-note">键入补充：${esc(typedNote)}</div>` : ""}
     </div>`;
   return `
@@ -631,6 +654,7 @@ async function renderChat() {
           <p class="desc">不限时的自由聊天，不计入每日打卡。Buddy 有长期记忆——你们聊过的事、你的名字和近况它都记得，隔几天回来接着聊也没问题。</p>
         </div>
         <div class="chat-head-right">
+          <label class="rate-label hf-label"><input type="checkbox" id="handsFree"> 免提连聊</label>
           <label class="rate-label">纠错力度
             <select id="fixLevel">
               <option value="light">轻度</option>
@@ -642,12 +666,15 @@ async function renderChat() {
         </div>
       </div>
       <div class="chat-box" id="chatBox"><p class="desc">加载中……</p></div>
+      <div class="photo-stage hidden" id="photoStage"></div>
       <div class="chat-input">
+        <button class="btn secondary" id="btnPhoto" title="发送图片">图</button>
+        <input type="file" id="photoFile" accept="image/*" class="hidden">
         <button class="btn" id="btnTalk">按一下说话</button>
-        <input id="chatText" placeholder="打字发送；录音时在这里输入人名/地名等关键词，会随语音一起发出" autocomplete="off">
+        <input id="chatText" placeholder="打字发送；录音时输入的内容作为关键词随语音发出" autocomplete="off">
         <button class="btn secondary" id="btnSend">发送</button>
       </div>
-      <div class="muted-sm" id="chatHint">语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。提到 Buddy 可能不认识的人名地名？录音的同时把它们打进输入框，Buddy 会以你打的拼写为准。</div>
+      <div class="muted-sm" id="chatHint">语音：点「按一下说话」，说完停顿 3.5 秒自动发送。开「免提连聊」后 Buddy 说完会自动听你说，戴耳机可全程不碰屏幕。点「图」发照片给 Buddy。</div>
     </div>`;
   const box = () => $("#chatBox");
   const scrollDown = () => { const b = box(); if (b) b.scrollTop = b.scrollHeight; };
@@ -671,6 +698,53 @@ async function renderChat() {
     } catch (e) { alert("设置失败：" + e.message); }
   };
 
+  /* 免提连聊开关 */
+  let handsFree = load("sg_handsfree", false);
+  const hfBox = $("#handsFree");
+  hfBox.checked = handsFree;
+  hfBox.onchange = () => {
+    handsFree = hfBox.checked;
+    save("sg_handsfree", handsFree);
+    const hint = $("#chatHint");
+    if (hint) hint.textContent = handsFree
+      ? "免提连聊已开启：Buddy 说完会自动开始听你说，戴上耳机聊起来吧。点一次「按一下说话」开始第一轮。"
+      : "免提连聊已关闭。";
+  };
+
+  /* 图片暂存 */
+  let pendingPhoto = null;
+  const renderStage = () => {
+    const s = $("#photoStage");
+    if (!s) return;
+    s.classList.toggle("hidden", !pendingPhoto);
+    s.innerHTML = pendingPhoto
+      ? `<img src="${pendingPhoto.url}" alt=""><span>图片已就绪：说话或打字描述它，随下一条消息发送</span><button class="note-del" id="stageRemove">移除</button>`
+      : "";
+    const r = $("#stageRemove");
+    if (r) r.onclick = async () => {
+      try { await api(`/api/photos/${pendingPhoto.id}`, { method: "DELETE" }); } catch (_) {}
+      pendingPhoto = null;
+      renderStage();
+    };
+  };
+  $("#btnPhoto").onclick = () => $("#photoFile").click();
+  $("#photoFile").onchange = async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const hint = $("#chatHint");
+    if (hint) hint.textContent = "图片压缩上传中……";
+    const blob = await downscaleImage(f);
+    try {
+      const resp = await api("/api/photos", { method: "POST", blob, mime: blob.type || "image/jpeg" });
+      pendingPhoto = { id: resp.id, url: URL.createObjectURL(blob) };
+      renderStage();
+      if (hint) hint.textContent = "图片已就绪：现在说话或打字描述它，会随下一条消息一起发给 Buddy 并存入图库。";
+    } catch (err) {
+      if (hint) hint.textContent = "图片上传失败：" + err.message;
+    }
+  };
+
   try {
     const h = await api("/api/chat/history");
     if (!box()) return;
@@ -678,7 +752,8 @@ async function renderChat() {
       ? h.items.map((m) => {
           let fix = null;
           try { fix = m.fix_json ? JSON.parse(m.fix_json) : null; } catch (_) {}
-          return chatBubble(m.role, m.content, fix, m.typed_note);
+          const src = m.photo_id ? `/api/photo/${m.photo_id}?t=${encodeURIComponent(AUTH.token)}` : null;
+          return chatBubble(m.role, m.content, fix, m.typed_note, src);
         }).join("")
       : chatBubble("ai", "Hey! I'm Buddy, your English chat partner. Tell me about your day — or anything on your mind. What's up?", null);
     scrollDown();
@@ -687,6 +762,7 @@ async function renderChat() {
   }
 
   async function handleReply(promise, placeholderId, note) {
+    let reply = null;
     try {
       const resp = await promise;
       const ph = document.getElementById(placeholderId);
@@ -695,19 +771,24 @@ async function renderChat() {
         const hint = $("#chatHint");
         if (hint) hint.textContent = "没有听清，请再试一次（离麦克风近一点）。";
         if (note) { const input = $("#chatText"); if (input && !input.value) input.value = note; }
+        chatBusy = false;
+        if (handsFree && $("#chatBox")) setTimeout(() => { if (!talking && !chatBusy) startTalk(); }, 600);
         return;
       }
-      if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null, resp.typed_note || note);
+      if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null, resp.typed_note || note, resp._photoUrl);
       else if (ph) ph.remove();
       append(chatBubble("ai", resp.reply, resp.fix));
-      speak(resp.reply);
+      reply = resp.reply;
     } catch (e) {
       const ph = document.getElementById(placeholderId);
       if (ph) ph.outerHTML = `<div class="msg ai"><div class="bubble">（${esc(e.message)}）</div></div>`;
       if (note) { const input = $("#chatText"); if (input && !input.value) input.value = note; }
-    } finally {
       chatBusy = false;
+      return;
     }
+    chatBusy = false;
+    await speak(reply);
+    if (handsFree && $("#chatBox") && !talking && !chatBusy) startTalk();
   }
 
   const sendText = () => {
@@ -721,25 +802,26 @@ async function renderChat() {
     if (!text || chatBusy) return;
     chatBusy = true;
     input.value = "";
-    append(chatBubble("user", text, null));
+    const photo = pendingPhoto;
+    pendingPhoto = null;
+    renderStage();
+    append(chatBubble("user", text, null, null, photo ? photo.url : null));
     const pid = "ph" + Date.now();
     append(`<div class="msg ai" id="${pid}"><div class="bubble thinking">Buddy 正在输入…</div></div>`);
-    handleReply(api("/api/chat/send", { json: { text } }), pid);
+    handleReply(api("/api/chat/send", { json: { text, photo_id: photo ? photo.id : null } }), pid);
   };
   $("#btnSend").onclick = sendText;
   $("#chatText").addEventListener("keydown", (e) => { if (e.key === "Enter") sendText(); });
 
   let talking = false;
   let finishTalk = null;
-  $("#btnTalk").onclick = async () => {
-    if (chatBusy) return;
-    if (talking) { if (finishTalk) finishTalk(); return; }
+  const startTalk = async () => {
+    if (chatBusy || talking || !$("#chatBox")) return;
     const recOk = await startRecording();
     if (!recOk) { alert("无法使用麦克风，请在浏览器地址栏允许麦克风权限。"); return; }
     talking = true;
     const btn = $("#btnTalk");
-    btn.textContent = "说完了（点击立即发送）";
-    btn.classList.add("recording");
+    if (btn) { btn.textContent = "说完了（点击立即发送）"; btn.classList.add("recording"); }
     const defaultHint = "正在录音……说完停顿 3.5 秒自动发送；思考时的停顿不用慌，继续说就行。";
     const hintEl = () => $("#chatHint");
     if (hintEl()) hintEl().textContent = defaultHint;
@@ -752,16 +834,24 @@ async function renderChat() {
       const blob = await stopRecording();
       const b2 = $("#btnTalk");
       if (b2) { b2.textContent = "按一下说话"; b2.classList.remove("recording"); }
-      if (hintEl()) hintEl().textContent = "语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。";
+      if (hintEl()) hintEl().textContent = handsFree ? "识别中……（免提模式：回复播完后会自动继续听）" : "语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。";
       if (!blob) return;
       chatBusy = true;
       const noteInput = $("#chatText");
       const note = noteInput ? noteInput.value.trim() : "";
       if (noteInput) noteInput.value = "";
+      const photo = pendingPhoto;
+      pendingPhoto = null;
+      renderStage();
       const pid = "ph" + Date.now();
       append(`<div class="msg user" id="${pid}"><div class="bubble thinking">（识别中…）</div></div>`);
-      const url = "/api/chat/voice" + (note ? `?note=${encodeURIComponent(note)}` : "");
-      handleReply(api(url, { method: "POST", blob, mime: blob.type }), pid, note);
+      const params = new URLSearchParams();
+      if (note) params.set("note", note);
+      if (photo) params.set("photo_id", photo.id);
+      const qs = params.toString();
+      const p = api("/api/chat/voice" + (qs ? "?" + qs : ""), { method: "POST", blob, mime: blob.type });
+      const wrapped = p.then((resp) => { if (photo) resp._photoUrl = photo.url; return resp; });
+      handleReply(wrapped, pid, note);
     };
     startVad(recorder.stream, finishTalk, {
       silenceMs: 3500,
@@ -774,6 +864,81 @@ async function renderChat() {
       },
     });
   };
+  $("#btnTalk").onclick = () => {
+    if (talking) { if (finishTalk) finishTalk(); return; }
+    startTalk();
+  };
+}
+
+/* ============ Tab：图库 ============ */
+async function renderGallery() {
+  if (!AUTH.user) return renderAuth();
+  view.innerHTML = `<div class="card"><p class="desc">加载中……</p></div>`;
+  let d;
+  try { d = await api("/api/photos"); } catch (e) {
+    view.innerHTML = `<div class="card"><p class="desc">加载失败：${esc(e.message)}</p></div>`;
+    return;
+  }
+  const items = d.items || [];
+  const groups = new Map();
+  for (const p of items) {
+    const key = p.album || "未整理";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  const ordered = [...groups.entries()].sort((a, b) => (a[0] === "未整理" ? -1 : b[0] === "未整理" ? 1 : 0));
+  view.innerHTML = `
+    <div class="card">
+      <div class="chat-head">
+        <div>
+          <h2>图库（${items.length} 张）</h2>
+          <p class="desc">在「AI 对话」里点「图」发照片，Buddy 会和你聊它，并自动打标签存到这里。未整理照片攒够 8 张后每天会自动归纳成相册，也可以手动整理。</p>
+        </div>
+        <button class="btn secondary" id="btnOrganize" ${items.length < 4 ? "disabled" : ""}>AI 整理图库</button>
+      </div>
+      <div id="orgMsg" class="muted-sm"></div>
+      ${items.length ? ordered.map(([album, ps]) => `
+        <h2 style="margin-top:18px">${esc(album)}（${ps.length}）</h2>
+        <div class="photo-grid">
+          ${ps.map((p) => {
+            let tags = [];
+            try { tags = p.tags_json ? JSON.parse(p.tags_json) : []; } catch (_) {}
+            return `
+            <div class="photo-card">
+              <img src="/api/photo/${p.id}?t=${encodeURIComponent(AUTH.token)}" loading="lazy" data-open="${p.id}" alt="">
+              <div class="photo-meta">
+                <span class="photo-date">${p.date}</span>
+                <button class="note-del photo-del" data-id="${p.id}">删除</button>
+              </div>
+              ${tags.length ? `<div class="photo-tags">${tags.map((t) => `<span class="tag-chip">${esc(t)}</span>`).join("")}</div>` : `<div class="photo-tags"><span class="tag-chip">标签生成中…</span></div>`}
+            </div>`;
+          }).join("")}
+        </div>`).join("") : `<p class="desc" style="margin-top:14px">还没有照片。去「AI 对话」发第一张吧。</p>`}
+    </div>`;
+  $("#btnOrganize").onclick = async () => {
+    const btn = $("#btnOrganize");
+    btn.disabled = true;
+    btn.textContent = "整理中…";
+    try {
+      const r = await api("/api/photos/organize", { method: "POST", json: {} });
+      $("#orgMsg").textContent = `已把 ${r.organized} 张照片整理进 ${r.albums.length} 个相册。`;
+      setTimeout(renderGallery, 800);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "AI 整理图库";
+      $("#orgMsg").textContent = "整理失败：" + e.message;
+    }
+  };
+  view.querySelectorAll("[data-open]").forEach((img) => {
+    img.onclick = () => window.open(img.src, "_blank");
+  });
+  view.querySelectorAll(".photo-del").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("删除这张照片？")) return;
+      try { await api(`/api/photos/${b.dataset.id}`, { method: "DELETE" }); renderGallery(); }
+      catch (e) { alert("删除失败：" + e.message); }
+    };
+  });
 }
 
 function renderAiBox(resp) {

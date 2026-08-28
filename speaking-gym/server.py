@@ -22,8 +22,10 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.abspath(os.environ.get("SG_DATA_DIR", os.path.join(BASE, "data")))
 REC_DIR = os.path.join(DATA, "recordings")
 TTS_DIR = os.path.join(DATA, "tts")
+PHOTO_DIR = os.path.join(DATA, "photos")
 os.makedirs(REC_DIR, exist_ok=True)
 os.makedirs(TTS_DIR, exist_ok=True)
+os.makedirs(PHOTO_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA, "gym.db")
 
 CONFIG = {}
@@ -32,6 +34,7 @@ if os.path.exists(_cfg):
     with open(_cfg) as f:
         CONFIG = json.load(f)
 DEEPSEEK_KEY = CONFIG.get("deepseek_api_key") or os.environ.get("DEEPSEEK_API_KEY", "")
+DASHSCOPE_KEY = CONFIG.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
 FORBIDDEN_STATIC = re.compile(r"(^|/)(data(/|$)|[^/]*\.(pem|db|log)$|run\.sh$|start\.sh$)")
@@ -91,6 +94,17 @@ def init_db():
             c.execute("ALTER TABLE chat_messages ADD COLUMN channel TEXT")
         if "typed_note" not in ccols:
             c.execute("ALTER TABLE chat_messages ADD COLUMN typed_note TEXT")
+        if "photo_id" not in ccols:
+            c.execute("ALTER TABLE chat_messages ADD COLUMN photo_id INTEGER")
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ts INTEGER, date TEXT,
+            caption TEXT, tags_json TEXT, album TEXT,
+            mime TEXT, path TEXT
+        );
+        """)
         c.executescript("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -396,16 +410,135 @@ CHAT_SYSTEM_TMPL = (
     "as the authoritative names/terms, and use them to interpret the spoken part — e.g. if the spoken text garbled a "
     "name that appears in [typed keywords], assume they mean that name). [typed] alone means the whole message was "
     "typed. NEVER echo these tags in your reply, and never correct the [typed keywords] content.\n"
+    "7. Photos: [photo attached] means the learner sent a photo with that caption. If a [photo content] line is "
+    "present, it is a factual description from a vision model — you may treat it as what the photo shows and react "
+    "to specific details in it. If there is no [photo content] line, you cannot see the image; never pretend you "
+    "can — engage with their caption instead. Either way, ask ONE question that pushes them to describe the photo "
+    "in richer English (colors, people, place, the story behind it).\n"
     'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or null}}'
 )
 
 
-def tag_user_content(content, channel, typed_note):
+def tag_user_content(content, channel, typed_note, photo_desc=None):
     if channel == "voice":
-        return "[spoken] " + content
-    if channel == "mixed":
-        return "[spoken] %s\n[typed keywords] %s" % (content, typed_note or "")
-    return "[typed] " + content
+        base = "[spoken] " + content
+    elif channel == "mixed":
+        base = "[spoken] %s\n[typed keywords] %s" % (content, typed_note or "")
+    else:
+        base = "[typed] " + content
+    if photo_desc is not None:  # None=无图；""=有图但无视觉模型；非空=视觉模型的画面描述
+        base = "[photo attached]\n" + base + (("\n[photo content] " + photo_desc) if photo_desc else "")
+    return base
+
+
+# ---------- 千问视觉模型（可选：配置 dashscope_api_key 后，Buddy 就能"看见"图片） ----------
+def qwen_vision_describe(path, mime, caption):
+    import base64
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    body = {
+        "model": "qwen-vl-plus",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime or "image/jpeg", b64)}},
+                {"type": "text", "text": (
+                    "Describe this photo factually in English, 50-90 words: scene, people (count, not identity), "
+                    "objects, any visible text (transcribe it), food, weather, mood. The photo owner's caption for "
+                    "context: %s" % (caption or "(none)")
+                )},
+            ],
+        }],
+        "max_tokens": 300,
+    }
+    req = urllib.request.Request(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + DASHSCOPE_KEY},
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        resp = json.load(r)
+    return resp["choices"][0]["message"]["content"].strip()
+
+
+TAG_SYSTEM = (
+    "You tag photos in a personal library. Given the owner's caption, an optional vision-model description and the "
+    "chat reply, produce 3-8 short keyword tags (English words or Chinese, whichever fits: places, people/pets by "
+    "name if mentioned, activities, objects, food, mood). "
+    'JSON ONLY: {"tags": ["...", "..."]}'
+)
+
+
+def tag_photo(pid, caption, vision_desc, reply):
+    try:
+        data = parse_chat_json(deepseek_call(
+            [{"role": "system", "content": TAG_SYSTEM},
+             {"role": "user", "content": json.dumps(
+                 {"caption": caption, "photo_description": vision_desc or None, "chat_reply": reply},
+                 ensure_ascii=False)}],
+            temperature=0.2, max_tokens=200,
+        ))
+        tags = [str(t).strip()[:30] for t in (data.get("tags") or []) if str(t).strip()][:8]
+        if tags:
+            with db() as c:
+                c.execute("UPDATE photos SET tags_json=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), pid))
+    except Exception as e:
+        sys.stderr.write("tag photo %s failed: %s\n" % (pid, e))
+
+
+ORGANIZE_SYSTEM = (
+    "You organize a personal photo library. Given photos with id, date, caption and tags, group ALL of them into "
+    "3-10 themed albums with concise Chinese names (例：港岛徒步、美食记录、和朋友的周末). Prefer themes over "
+    "dates; use dates only when a clear event emerges. Every photo id must appear in exactly one album. "
+    'JSON ONLY: {"albums": [{"name": "...", "photo_ids": [1, 2]}]}'
+)
+
+
+def organize_photos(uid):
+    with db() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT id, date, caption, tags_json FROM photos WHERE user_id=? ORDER BY ts ASC", (uid,)
+        ).fetchall()]
+    if len(rows) < 4:
+        return {"organized": 0, "albums": []}
+    payload = [{"id": r["id"], "date": r["date"], "caption": (r["caption"] or "")[:100],
+                "tags": json.loads(r["tags_json"]) if r["tags_json"] else []} for r in rows]
+    data = parse_chat_json(deepseek_call(
+        [{"role": "system", "content": ORGANIZE_SYSTEM},
+         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        temperature=0.2, max_tokens=1200,
+    ))
+    valid_ids = {r["id"] for r in rows}
+    albums, n = [], 0
+    with db() as c:
+        for alb in (data.get("albums") or []):
+            name = str(alb.get("name", "")).strip()[:40]
+            ids = [i for i in (alb.get("photo_ids") or []) if i in valid_ids]
+            if not name or not ids:
+                continue
+            albums.append({"name": name, "count": len(ids)})
+            n += len(ids)
+            c.execute(
+                "UPDATE photos SET album=? WHERE user_id=? AND id IN (%s)" % ",".join(map(str, ids)),
+                (name, uid),
+            )
+    return {"organized": n, "albums": albums}
+
+
+def auto_organize_loop():
+    """每 24 小时检查一次：未整理照片攒到 8 张以上的用户，自动整理图库。"""
+    while True:
+        time.sleep(24 * 3600)
+        try:
+            with db() as c:
+                uids = [r[0] for r in c.execute(
+                    "SELECT user_id FROM photos WHERE album IS NULL GROUP BY user_id HAVING COUNT(*)>=8"
+                )]
+            for uid in uids:
+                organize_photos(uid)
+                sys.stderr.write("auto organized photos for user %s\n" % uid)
+        except Exception as e:
+            sys.stderr.write("auto organize failed: %s\n" % e)
 
 SUMMARY_SYSTEM = (
     "You maintain long-term memory notes about an English learner, based on their chats with an AI partner. "
@@ -441,12 +574,28 @@ def parse_chat_json(content):
     return {"reply": content, "fix": None}
 
 
-def chat_turn(uid, text, channel="text", typed_note=None):
+def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
+    photo_desc = None
+    photo = None
+    if photo_id:
+        with db() as c:
+            photo = c.execute("SELECT * FROM photos WHERE id=? AND user_id=?", (int(photo_id), uid)).fetchone()
+        if photo:
+            photo_desc = ""
+            if DASHSCOPE_KEY:
+                try:
+                    photo_desc = qwen_vision_describe(
+                        os.path.join(PHOTO_DIR, photo["path"]), photo["mime"], text)
+                except Exception as e:
+                    sys.stderr.write("vision failed: %s\n" % e)
+        else:
+            photo_id = None
     with db() as c:
         mem = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
         urow = c.execute("SELECT chat_fix_level FROM users WHERE id=?", (uid,)).fetchone()
         recent = [dict(r) for r in c.execute(
-            "SELECT role, content, channel, typed_note FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 16",
+            "SELECT role, content, channel, typed_note, photo_id FROM chat_messages "
+            "WHERE user_id=? ORDER BY id DESC LIMIT 16",
             (uid,)
         ).fetchall()][::-1]
     level = (urow["chat_fix_level"] if urow else None) or "standard"
@@ -458,8 +607,10 @@ def chat_turn(uid, text, channel="text", typed_note=None):
             # 历史 assistant 消息统一还原成 JSON 形态，与要求的输出格式保持一致
             msgs.append({"role": "assistant", "content": json.dumps({"reply": m["content"]}, ensure_ascii=False)})
         else:
-            msgs.append({"role": "user", "content": tag_user_content(m["content"], m["channel"] or "text", m["typed_note"])})
-    msgs.append({"role": "user", "content": tag_user_content(text, channel, typed_note)})
+            msgs.append({"role": "user", "content": tag_user_content(
+                m["content"], m["channel"] or "text", m["typed_note"],
+                "" if m["photo_id"] else None)})
+    msgs.append({"role": "user", "content": tag_user_content(text, channel, typed_note, photo_desc)})
     data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=1000))
     reply = str(data.get("reply", "")).strip() or "Sorry, could you say that again?"
     fix = data.get("fix") or None
@@ -476,15 +627,20 @@ def chat_turn(uid, text, channel="text", typed_note=None):
     now = int(time.time() * 1000)
     with db() as c:
         c.execute(
-            "INSERT INTO chat_messages (user_id, ts, role, content, channel, typed_note) VALUES (?,?,?,?,?,?)",
-            (uid, now, "user", text, channel, typed_note),
+            "INSERT INTO chat_messages (user_id, ts, role, content, channel, typed_note, photo_id) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (uid, now, "user", text, channel, typed_note, photo_id),
         )
         c.execute(
             "INSERT INTO chat_messages (user_id, ts, role, content, fix_json) VALUES (?,?,?,?,?)",
             (uid, now + 1, "assistant", reply, json.dumps(fix, ensure_ascii=False) if fix else None),
         )
+        if photo_id:
+            c.execute("UPDATE photos SET caption=? WHERE id=? AND user_id=?", (text[:300], int(photo_id), uid))
+    if photo_id:
+        threading.Thread(target=tag_photo, args=(int(photo_id), text, photo_desc, reply), daemon=True).start()
     threading.Thread(target=maybe_summarize, args=(uid,), daemon=True).start()
-    return {"reply": reply, "fix": fix}
+    return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None}
 
 
 def maybe_summarize(uid):
@@ -620,6 +776,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_chat_send()
             if p == "/api/chat/voice":
                 return self.api_chat_voice()
+            if p == "/api/photos":
+                return self.api_photo_upload()
+            if p == "/api/photos/organize":
+                return self.api_photo_organize()
             m = re.match(r"^/api/rescore/(\d+)$", p)
             if m:
                 return self.api_rescore(int(m.group(1)))
@@ -635,6 +795,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with db() as c:
                 c.execute("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
                 c.execute("DELETE FROM chat_memory WHERE user_id=?", (user["id"],))
+            return self.send_json({"ok": True})
+        mp = re.match(r"^/api/photos/(\d+)$", self.qpath())
+        if mp:
+            user = self.auth()
+            if not user:
+                return self.fail("unauthorized", 401)
+            pid = int(mp.group(1))
+            with db() as c:
+                row = c.execute("SELECT * FROM photos WHERE id=? AND user_id=?", (pid, user["id"])).fetchone()
+                if not row:
+                    return self.fail("not found", 404)
+                c.execute("DELETE FROM photos WHERE id=?", (pid,))
+                c.execute("UPDATE chat_messages SET photo_id=NULL WHERE photo_id=? AND user_id=?", (pid, user["id"]))
+            try:
+                os.remove(os.path.join(PHOTO_DIR, row["path"]))
+            except OSError:
+                pass
             return self.send_json({"ok": True})
         m = re.match(r"^/api/recordings/(\d+)$", self.qpath())
         if not m:
@@ -708,10 +885,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self.fail("unauthorized", 401)
                 with db() as c:
                     rows = c.execute(
-                        "SELECT id, ts, role, content, fix_json, channel, typed_note FROM chat_messages "
+                        "SELECT id, ts, role, content, fix_json, channel, typed_note, photo_id FROM chat_messages "
                         "WHERE user_id=? ORDER BY id DESC LIMIT 100", (user["id"],)
                     ).fetchall()
                 return self.send_json({"items": [dict(r) for r in reversed(rows)]})
+            if p == "/api/photos":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                with db() as c:
+                    rows = c.execute(
+                        "SELECT id, ts, date, caption, tags_json, album FROM photos "
+                        "WHERE user_id=? ORDER BY ts DESC LIMIT 500", (user["id"],)
+                    ).fetchall()
+                return self.send_json({"items": [dict(r) for r in rows]})
+            m = re.match(r"^/api/photo/(\d+)$", p)
+            if m:
+                return self.api_photo_file(int(m.group(1)))
             m = re.match(r"^/api/audio/(\d+)$", p)
             if m:
                 return self.api_audio(int(m.group(1)))
@@ -883,6 +1073,59 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "transcript": transcript, "wpm": wpm, "words": words, "fillers": fillers,
         })
 
+    # --- 图片 ---
+    PHOTO_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif", "image/heic": ".heic"}
+
+    def api_photo_upload(self):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        blob = self.body_raw(limit=15_000_000)
+        if not blob:
+            return self.fail("empty image")
+        mime = (self.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+        ext = self.PHOTO_EXT.get(mime, ".jpg")
+        fname = secrets.token_hex(16) + ext
+        with open(os.path.join(PHOTO_DIR, fname), "wb") as f:
+            f.write(blob)
+        with db() as c:
+            cur = c.execute(
+                "INSERT INTO photos (user_id, ts, date, mime, path) VALUES (?,?,?,?,?)",
+                (user["id"], int(time.time() * 1000), date.today().isoformat(), mime, fname),
+            )
+        return self.send_json({"id": cur.lastrowid})
+
+    def api_photo_file(self, pid):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        with db() as c:
+            row = c.execute("SELECT * FROM photos WHERE id=? AND user_id=?", (pid, user["id"])).fetchone()
+        if not row:
+            return self.fail("not found", 404)
+        fp = os.path.join(PHOTO_DIR, row["path"])
+        if not os.path.exists(fp):
+            return self.fail("file missing", 404)
+        with open(fp, "rb") as f:
+            raw = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", row["mime"] or "image/jpeg")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "private, max-age=604800")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def api_photo_organize(self):
+        user = self.auth()
+        if not user:
+            return self.fail("unauthorized", 401)
+        if not DEEPSEEK_KEY:
+            return self.fail("服务器未配置 AI Key")
+        try:
+            return self.send_json(organize_photos(user["id"]))
+        except Exception as e:
+            return self.fail("整理失败：%s" % e, 502)
+
     # --- AI 对话 ---
     def api_chat_send(self):
         user = self.auth()
@@ -890,11 +1133,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.fail("unauthorized", 401)
         if not DEEPSEEK_KEY:
             return self.fail("服务器未配置 AI Key")
-        text = (self.body_json().get("text") or "").strip()[:2000]
+        d = self.body_json()
+        text = (d.get("text") or "").strip()[:2000]
         if not text:
             return self.fail("empty text")
         try:
-            return self.send_json(chat_turn(user["id"], text, channel="text"))
+            return self.send_json(chat_turn(user["id"], text, channel="text", photo_id=d.get("photo_id")))
         except Exception as e:
             sys.stderr.write("chat failed (user %s): %s\n" % (user["id"], e))
             return self.fail("对话服务暂时不可用，请重试", 502)
@@ -928,8 +1172,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"user_text": "", "reply": None, "fix": None})
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         note = (q.get("note") or [""])[0].strip()[:500]
+        photo_id = (q.get("photo_id") or [""])[0]
         try:
-            result = chat_turn(user["id"], text, channel="mixed" if note else "voice", typed_note=note or None)
+            result = chat_turn(
+                user["id"], text, channel="mixed" if note else "voice",
+                typed_note=note or None, photo_id=int(photo_id) if photo_id.isdigit() else None,
+            )
         except Exception as e:
             sys.stderr.write("chat failed (user %s): %s\n" % (user["id"], e))
             return self.fail("对话服务暂时不可用，请重试", 502)
@@ -1098,6 +1346,8 @@ def main():
         print("Whisper: enabled, warming up model '%s'" % os.environ.get("SG_WHISPER_MODEL", "small"))
     else:
         print("Whisper: not installed, falling back to browser transcripts")
+    threading.Thread(target=auto_organize_loop, daemon=True).start()
+    print("Vision (qwen-vl): %s" % ("on" if DASHSCOPE_KEY else "off — set dashscope_api_key in config.json to enable"))
     handler = functools.partial(Handler, directory=BASE)
     cert, key = os.path.join(BASE, "cert.pem"), os.path.join(BASE, "key.pem")
     if os.path.exists(cert) and os.path.exists(key):
