@@ -626,7 +626,16 @@ async function renderChat() {
           <h2>AI 对话 · Buddy</h2>
           <p class="desc">不限时的自由聊天，不计入每日打卡。Buddy 有长期记忆——你们聊过的事、你的名字和近况它都记得，隔几天回来接着聊也没问题。</p>
         </div>
-        <button class="link-btn" id="chatClear">清空对话与记忆</button>
+        <div class="chat-head-right">
+          <label class="rate-label">纠错力度
+            <select id="fixLevel">
+              <option value="light">轻度</option>
+              <option value="standard">标准</option>
+              <option value="strict">严格</option>
+            </select>
+          </label>
+          <button class="link-btn" id="chatClear">清空对话与记忆</button>
+        </div>
       </div>
       <div class="chat-box" id="chatBox"><p class="desc">加载中……</p></div>
       <div class="chat-input">
@@ -643,6 +652,19 @@ async function renderChat() {
   $("#chatClear").onclick = async () => {
     if (!confirm("确定清空所有对话记录和 Buddy 的记忆吗？此操作不可恢复。")) return;
     try { await api("/api/chat", { method: "DELETE" }); renderChat(); } catch (e) { alert("清空失败：" + e.message); }
+  };
+
+  const fixSel = $("#fixLevel");
+  fixSel.value = (AUTH.user && AUTH.user.chat_fix_level) || "standard";
+  fixSel.onchange = async () => {
+    const v = fixSel.value;
+    try {
+      await api("/api/settings", { json: { chat_fix_level: v } });
+      if (AUTH.user) AUTH.user.chat_fix_level = v;
+      const names = { light: "轻度：只纠影响理解的错误", standard: "标准：每轮最多一条值得学的纠错", strict: "严格：只要有错就必须纠" };
+      const hint = $("#chatHint");
+      if (hint) hint.textContent = "纠错力度已切换为「" + names[v] + "」，下一条消息开始生效。";
+    } catch (e) { alert("设置失败：" + e.message); }
   };
 
   try {

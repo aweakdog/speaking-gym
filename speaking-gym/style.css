@@ -162,7 +162,8 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .rec-user { color: var(--accent); font-weight: 700; }
 
 /* AI 对话 */
-.chat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.chat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.chat-head-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .chat-box { max-height: 56vh; min-height: 260px; overflow-y: auto; background: #f8faf9; border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 12px 0; }
 .msg { display: flex; flex-direction: column; margin-bottom: 10px; }
 .msg.user { align-items: flex-end; }

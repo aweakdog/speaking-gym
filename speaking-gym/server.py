@@ -83,6 +83,9 @@ def init_db():
             c.execute("ALTER TABLE recordings ADD COLUMN transcript TEXT")
         if "ai_json" not in cols:
             c.execute("ALTER TABLE recordings ADD COLUMN ai_json TEXT")
+        ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+        if "chat_fix_level" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN chat_fix_level TEXT DEFAULT 'standard'")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -343,7 +346,32 @@ def deepseek_score(payload):
 
 
 # ---------- AI 对话（带长期记忆） ----------
-CHAT_SYSTEM = (
+FIX_RULES = {
+    "light": (
+        "4. Corrections: only add a fix when an error genuinely hurts understanding or sounds jarring; "
+        "otherwise use null. At most one fix per turn."
+    ),
+    "standard": (
+        "4. Corrections: if their message contains one notable error or unnatural phrasing, add a brief fix "
+        "(their original words, the natural version, short Chinese explanation). Skip trivial slips and "
+        "speech-recognition artifacts; at most one fix per turn, or null."
+    ),
+    "strict": (
+        "4. Corrections: check EVERY message carefully. If there is ANY grammatical error or unnatural phrasing, "
+        "you MUST include a fix for the most instructive one (their original words, the natural version, short "
+        "Chinese explanation). Only return null when the message is genuinely flawless. Ignore pure "
+        "speech-recognition artifacts (impossible homophones), but never let real learner errors slide."
+    ),
+}
+
+STRICT_CHECK_SYSTEM = (
+    "You are a precise English grammar checker for a Chinese learner's spoken sentence (an ASR transcript; ignore "
+    "punctuation, casing and obvious mishearings). If the sentence contains a real grammatical error or clearly "
+    "unnatural phrasing, return the single most instructive fix. If it is acceptable spoken English, return null. "
+    'JSON ONLY: {"fix": {"original": "...", "better": "...", "why_zh": "..."} or null}'
+)
+
+CHAT_SYSTEM_TMPL = (
     "You are Buddy, a warm, witty English conversation partner and speaking coach for a Chinese intermediate learner "
     "(CEFR B1-B2). Rules:\n"
     "1. Reply in natural spoken English, 2-4 short sentences. Ask at most ONE follow-up question, digging into what "
@@ -351,11 +379,9 @@ CHAT_SYSTEM = (
     "2. Use the MEMORY notes to stay consistent and personal: reference their name, job, plans and past "
     "conversations naturally when relevant, like a friend who remembers.\n"
     "3. Keep vocabulary mostly B1-B2, but occasionally drop ONE vivid idiomatic expression worth learning.\n"
-    "4. If their message contains one notable error or unnatural phrasing, add a brief fix (their original words, "
-    "the natural version, short Chinese explanation). Skip trivial slips and speech-recognition artifacts; at most "
-    "one fix per turn, or null.\n"
+    "{fix_rule}\n"
     "5. Never lecture, never write essays. Keep it flowing like a real chat.\n"
-    'Respond with JSON ONLY: {"reply": "...", "fix": {"original": "...", "better": "...", "why_zh": "..."} or null}'
+    'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or null}}'
 )
 
 SUMMARY_SYSTEM = (
@@ -388,11 +414,14 @@ def parse_chat_json(content):
 def chat_turn(uid, text):
     with db() as c:
         mem = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
+        urow = c.execute("SELECT chat_fix_level FROM users WHERE id=?", (uid,)).fetchone()
         recent = [dict(r) for r in c.execute(
             "SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 16", (uid,)
         ).fetchall()][::-1]
+    level = (urow["chat_fix_level"] if urow else None) or "standard"
+    system = CHAT_SYSTEM_TMPL.format(fix_rule=FIX_RULES.get(level, FIX_RULES["standard"]))
     summary = (mem["summary"] if mem else "") or "(nothing yet — the conversation just started)"
-    msgs = [{"role": "system", "content": CHAT_SYSTEM + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
+    msgs = [{"role": "system", "content": system + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
     for m in recent:
         if m["role"] == "assistant":
             # 历史 assistant 消息统一还原成 JSON 形态，与要求的输出格式保持一致
@@ -403,6 +432,16 @@ def chat_turn(uid, text):
     data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=600))
     reply = str(data.get("reply", "")).strip() or "Sorry, could you say that again?"
     fix = data.get("fix") or None
+    if level == "strict" and not fix:
+        # 严格模式下主回复没给纠错时，用低温度的专职语法检查兜底
+        try:
+            data2 = parse_chat_json(deepseek_call(
+                [{"role": "system", "content": STRICT_CHECK_SYSTEM}, {"role": "user", "content": text}],
+                temperature=0.0, max_tokens=300,
+            ))
+            fix = data2.get("fix") or None
+        except Exception as e:
+            sys.stderr.write("strict check failed: %s\n" % e)
     now = int(time.time() * 1000)
     with db() as c:
         c.execute("INSERT INTO chat_messages (user_id, ts, role, content) VALUES (?,?,?,?)", (uid, now, "user", text))
@@ -571,6 +610,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.send_json({
                     "username": user["username"],
                     "public_audio": bool(user["public_audio"]),
+                    "chat_fix_level": (user["chat_fix_level"] if "chat_fix_level" in user.keys() else None) or "standard",
                     "ai_enabled": bool(DEEPSEEK_KEY),
                 })
             if p == "/api/scores":
@@ -707,8 +747,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.fail("unauthorized", 401)
         d = self.body_json()
         with db() as c:
-            c.execute("UPDATE users SET public_audio=? WHERE id=?", (1 if d.get("public_audio") else 0, user["id"]))
-        return self.send_json({"ok": True, "public_audio": bool(d.get("public_audio"))})
+            if "public_audio" in d:
+                c.execute("UPDATE users SET public_audio=? WHERE id=?", (1 if d["public_audio"] else 0, user["id"]))
+            if d.get("chat_fix_level") in ("light", "standard", "strict"):
+                c.execute("UPDATE users SET chat_fix_level=? WHERE id=?", (d["chat_fix_level"], user["id"]))
+        return self.send_json({"ok": True})
 
     # --- 评分 ---
     def api_score(self):
