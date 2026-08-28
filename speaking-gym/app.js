@@ -239,7 +239,7 @@ function discardRecording() {
 
 /* ============ 音量检测（跟读自动断句：停顿 2 秒才结束，逗号换气不会截断） ============ */
 const vad = { ctx: null, timer: null };
-function startVad(stream, onStop, { threshold = 0.02, silenceMs = 2000, maxMs = 20000 } = {}) {
+function startVad(stream, onStop, { silenceMs = 2000, maxMs = 20000, onSilence } = {}) {
   stopVad();
   const Ctx = window.AudioContext || window.webkitAudioContext;
   if (!Ctx) return;
@@ -248,6 +248,7 @@ function startVad(stream, onStop, { threshold = 0.02, silenceMs = 2000, maxMs = 
   analyser.fftSize = 2048;
   ctx.createMediaStreamSource(stream).connect(analyser);
   const buf = new Uint8Array(analyser.fftSize);
+  const recent = [];
   let spoke = false, silent = 0, total = 0, last = performance.now();
   vad.ctx = ctx;
   vad.timer = setInterval(() => {
@@ -255,12 +256,20 @@ function startVad(stream, onStop, { threshold = 0.02, silenceMs = 2000, maxMs = 
     let sum = 0;
     for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
     const rms = Math.sqrt(sum / buf.length);
+    recent.push(rms);
+    if (recent.length > 15) recent.shift();
+    const floor = Math.min(...recent); // 最近 1.5 秒的环境噪声底
+    const threshold = Math.max(0.008, floor * 2.5 + 0.004); // 自适应阈值：轻声说话也能被识别
     const now = performance.now();
     const dt = now - last;
     last = now; total += dt;
-    if (rms > threshold) { spoke = true; silent = 0; }
-    else if (spoke) silent += dt;
-    if ((spoke && silent >= silenceMs) || total >= maxMs) { stopVad(); onStop(); }
+    if (rms > threshold) { spoke = true; silent = 0; if (onSilence) onSilence(null); }
+    else if (spoke) { silent += dt; if (onSilence) onSilence(Math.max(0, silenceMs - silent)); }
+    if ((spoke && silent >= silenceMs) || total >= maxMs) {
+      stopVad();
+      if (onSilence) onSilence(null);
+      onStop();
+    }
   }, 100);
 }
 function stopVad() {
@@ -625,7 +634,7 @@ async function renderChat() {
         <input id="chatText" placeholder="或者打字…（Enter 发送）" autocomplete="off">
         <button class="btn secondary" id="btnSend">发送</button>
       </div>
-      <div class="muted-sm" id="chatHint">语音：点「按一下说话」开始，说完停顿 2 秒自动发送；再点一下可手动结束。</div>
+      <div class="muted-sm" id="chatHint">语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送——思考时慢慢想，继续说就不会被切断；着急的话再点一下按钮立即发送。</div>
     </div>`;
   const box = () => $("#chatBox");
   const scrollDown = () => { const b = box(); if (b) b.scrollTop = b.scrollHeight; };
@@ -696,8 +705,11 @@ async function renderChat() {
     if (!recOk) { alert("无法使用麦克风，请在浏览器地址栏允许麦克风权限。"); return; }
     talking = true;
     const btn = $("#btnTalk");
-    btn.textContent = "说完了（停顿 2 秒自动发送）";
+    btn.textContent = "说完了（点击立即发送）";
     btn.classList.add("recording");
+    const defaultHint = "正在录音……说完停顿 3.5 秒自动发送；思考时的停顿不用慌，继续说就行。";
+    const hintEl = () => $("#chatHint");
+    if (hintEl()) hintEl().textContent = defaultHint;
     let done = false;
     finishTalk = async () => {
       if (done) return;
@@ -707,13 +719,23 @@ async function renderChat() {
       const blob = await stopRecording();
       const b2 = $("#btnTalk");
       if (b2) { b2.textContent = "按一下说话"; b2.classList.remove("recording"); }
+      if (hintEl()) hintEl().textContent = "语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。";
       if (!blob) return;
       chatBusy = true;
       const pid = "ph" + Date.now();
       append(`<div class="msg user" id="${pid}"><div class="bubble thinking">（识别中…）</div></div>`);
       handleReply(api("/api/chat/voice", { method: "POST", blob, mime: blob.type }), pid);
     };
-    startVad(recorder.stream, finishTalk, { maxMs: 60000 });
+    startVad(recorder.stream, finishTalk, {
+      silenceMs: 3500,
+      maxMs: 120000,
+      onSilence: (left) => {
+        const h = hintEl();
+        if (!h) return;
+        h.textContent = left == null ? defaultHint
+          : `检测到停顿，${(left / 1000).toFixed(1)} 秒后自动发送——继续说话即可取消。`;
+      },
+    });
   };
 }
 
