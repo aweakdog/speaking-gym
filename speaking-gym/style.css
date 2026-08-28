@@ -197,6 +197,9 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .photo-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .tag-chip { background: var(--accent-soft); color: var(--accent); font-size: 11px; border-radius: 6px; padding: 1px 7px; }
 
+.chat-note { max-width: 82%; background: var(--accent-soft); color: var(--accent); border-radius: 10px; padding: 7px 12px; font-size: 13px; }
+.chat-note .link-btn { margin-left: 6px; font-size: 13px; }
+
 /* 长期记忆 */
 .mem-notes { white-space: pre-wrap; background: #f8faf9; border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 14px; line-height: 1.75; }
 .danger-btn { border-color: var(--danger) !important; color: var(--danger) !important; }

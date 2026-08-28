@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.abspath(os.environ.get("SG_DATA_DIR", os.path.join(BASE, "data")))
@@ -112,6 +112,18 @@ def init_db():
             ts INTEGER, date TEXT,
             caption TEXT, tags_json TEXT, album TEXT,
             mime TEXT, path TEXT
+        );
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            text TEXT, rtype TEXT, weekday INTEGER, time TEXT,
+            fire_at INTEGER, active INTEGER DEFAULT 1, created INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS push_subs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            endpoint TEXT UNIQUE,
+            sub_json TEXT, created INTEGER
         );
         """)
         c.executescript("""
@@ -425,7 +437,21 @@ CHAT_SYSTEM_TMPL = (
     "can NOT see the image at all: say so naturally (e.g. 'the photo isn't loading for me'), NEVER invent or imply "
     "any visual detail, and instead ask them to describe it. Either way, ask ONE question that pushes them to "
     "describe the photo in richer English (colors, people, place, the story behind it).\n"
-    'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or null}}'
+    "8. Time awareness: the system message tells you the CURRENT TIME, and learner messages carry a [time] tag. "
+    "Use them naturally (\"yesterday you mentioned...\", \"how did Monday's meeting go?\") and to resolve relative "
+    "dates. Never echo the tags.\n"
+    "9. Memory requests: when the learner explicitly asks you to remember something (记住 / remember / note this "
+    "down), or shares a durable personal fact clearly worth keeping, put a concise English note in memory_add "
+    "(otherwise null). Briefly confirm in your reply what you saved.\n"
+    "10. Reminders: when the learner asks to be reminded of something, you MUST fill the reminder field — never say "
+    "a reminder is set unless the field is filled (the system only creates it from the field, not from your words). "
+    "Shape: text (short, in their words), type (\"once\"|\"daily\"|\"weekly\"), weekday (0-6, Monday=0, weekly "
+    "only), time (\"HH:MM\" 24h, default \"09:00\"), datetime (\"YYYY-MM-DD HH:MM\", REQUIRED for once). Resolve "
+    "relative dates using CURRENT TIME. Example: {{\"text\": \"take out the laundry\", \"type\": \"once\", "
+    "\"datetime\": \"2026-08-28 21:06\"}}. Confirm the exact schedule in your reply. Otherwise null.\n"
+    'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or '
+    'null, "memory_add": "..." or null, "reminder": {{"text": "...", "type": "...", "weekday": 0, "time": "HH:MM", '
+    '"datetime": "..."}} or null}}'
 )
 
 
@@ -439,6 +465,116 @@ def tag_user_content(content, channel, typed_note, photo_desc=None):
     if photo_desc is not None:  # None=无图；""=有图但无视觉模型；非空=视觉模型的画面描述
         base = "[photo attached]\n" + base + (("\n[photo content] " + photo_desc) if photo_desc else "")
     return base
+
+
+# ---------- Web Push 通知（macOS 浏览器 + iPhone 主屏幕 PWA） ----------
+def push_available():
+    try:
+        import pywebpush  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def ensure_vapid():
+    p = os.path.join(DATA, "vapid.pem")
+    if not os.path.exists(p):
+        from py_vapid import Vapid02
+        v = Vapid02()
+        v.generate_keys()
+        v.save_key(p)
+        os.chmod(p, 0o600)
+    return p
+
+
+def vapid_public_b64():
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from py_vapid import Vapid02
+    v = Vapid02.from_file(ensure_vapid())
+    raw = v.public_key.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def push_to_user(uid, title, body):
+    if not push_available():
+        return 0
+    from pywebpush import webpush, WebPushException
+    with db() as c:
+        subs = [dict(r) for r in c.execute("SELECT * FROM push_subs WHERE user_id=?", (uid,)).fetchall()]
+    sent = 0
+    for s in subs:
+        try:
+            webpush(
+                json.loads(s["sub_json"]),
+                json.dumps({"title": title, "body": body, "url": "/"}, ensure_ascii=False),
+                vapid_private_key=ensure_vapid(),
+                vapid_claims={"sub": "mailto:speaking-gym@example.com"},
+                timeout=15,
+            )
+            sent += 1
+        except WebPushException as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (404, 410):  # 订阅已失效
+                with db() as c:
+                    c.execute("DELETE FROM push_subs WHERE id=?", (s["id"],))
+            else:
+                sys.stderr.write("push failed (sub %s): %s\n" % (s["id"], e))
+        except Exception as e:
+            sys.stderr.write("push failed (sub %s): %s\n" % (s["id"], e))
+    return sent
+
+
+# ---------- 定时提醒 ----------
+def next_fire(rtype, weekday, time_str, base=None):
+    now = base or datetime.now()
+    hh, mm = map(int, (time_str or "09:00").split(":"))
+    cand = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if rtype == "daily":
+        if cand <= now:
+            cand += timedelta(days=1)
+    else:  # weekly
+        cand += timedelta(days=(int(weekday) - cand.weekday()) % 7)
+        if cand <= now:
+            cand += timedelta(days=7)
+    return int(cand.timestamp())
+
+
+def schedule_label(r):
+    wd = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    if r["rtype"] == "once":
+        return datetime.fromtimestamp(r["fire_at"]).strftime("%Y-%m-%d %H:%M")
+    if r["rtype"] == "daily":
+        return "每天 %s" % r["time"]
+    return "每%s %s" % (wd[int(r["weekday"] or 0)], r["time"])
+
+
+def reminders_loop():
+    """每 30 秒检查一次到期提醒：写入对话 + 推送到所有订阅设备。"""
+    while True:
+        time.sleep(30)
+        try:
+            now = int(time.time())
+            with db() as c:
+                due = [dict(r) for r in c.execute(
+                    "SELECT * FROM reminders WHERE active=1 AND fire_at<=?", (now,)).fetchall()]
+            for r in due:
+                body = "Reminder: %s" % r["text"]
+                ts = int(time.time() * 1000)
+                with db() as c:
+                    c.execute(
+                        "INSERT INTO chat_messages (user_id, ts, role, content) VALUES (?,?,?,?)",
+                        (r["user_id"], ts, "assistant", body),
+                    )
+                    if r["rtype"] == "once":
+                        c.execute("UPDATE reminders SET active=0 WHERE id=?", (r["id"],))
+                    else:
+                        c.execute("UPDATE reminders SET fire_at=? WHERE id=?",
+                                  (next_fire(r["rtype"], r["weekday"], r["time"]), r["id"]))
+                n = push_to_user(r["user_id"], "Buddy 提醒", r["text"])
+                sys.stderr.write("reminder %s fired (user %s, pushed to %d devices)\n" % (r["id"], r["user_id"], n))
+        except Exception as e:
+            sys.stderr.write("reminders loop error: %s\n" % e)
 
 
 # ---------- 视觉模型（deepseek-v4-flash-vision-exp / qwen3.8-flash，可配置切换） ----------
@@ -608,26 +744,77 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         mem = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
         urow = c.execute("SELECT chat_fix_level FROM users WHERE id=?", (uid,)).fetchone()
         recent = [dict(r) for r in c.execute(
-            "SELECT role, content, channel, typed_note, photo_id FROM chat_messages "
+            "SELECT ts, role, content, channel, typed_note, photo_id FROM chat_messages "
             "WHERE user_id=? ORDER BY id DESC LIMIT 16",
             (uid,)
         ).fetchall()][::-1]
     level = (urow["chat_fix_level"] if urow else None) or "standard"
     system = CHAT_SYSTEM_TMPL.format(fix_rule=FIX_RULES.get(level, FIX_RULES["standard"]))
+    now = datetime.now()
+    wd_en = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][now.weekday()]
+    time_line = "CURRENT TIME: %s (%s), timezone Asia/Hong_Kong." % (now.strftime("%Y-%m-%d %H:%M"), wd_en)
     summary = (mem["summary"] if mem else "") or "(nothing yet — the conversation just started)"
-    msgs = [{"role": "system", "content": system + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
+    msgs = [{"role": "system", "content": system + "\n\n" + time_line + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
     for m in recent:
         if m["role"] == "assistant":
-            # 历史 assistant 消息统一还原成 JSON 形态，与要求的输出格式保持一致
-            msgs.append({"role": "assistant", "content": json.dumps({"reply": m["content"]}, ensure_ascii=False)})
+            # 历史 assistant 消息统一还原成完整 JSON 形态，让模型持续模仿全字段输出格式
+            msgs.append({"role": "assistant", "content": json.dumps(
+                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None}, ensure_ascii=False)})
         else:
-            msgs.append({"role": "user", "content": tag_user_content(
+            ttag = "[time %s] " % datetime.fromtimestamp((m["ts"] or 0) / 1000).strftime("%m-%d %H:%M")
+            msgs.append({"role": "user", "content": ttag + tag_user_content(
                 m["content"], m["channel"] or "text", m["typed_note"],
                 "" if m["photo_id"] else None)})
-    msgs.append({"role": "user", "content": tag_user_content(text, channel, typed_note, photo_desc)})
+    msgs.append({"role": "user", "content": ("[time %s] " % now.strftime("%m-%d %H:%M"))
+                 + tag_user_content(text, channel, typed_note, photo_desc)})
     data = parse_chat_json(deepseek_call(msgs, temperature=0.7, max_tokens=1000))
     reply = str(data.get("reply", "")).strip() or "Sorry, could you say that again?"
     fix = data.get("fix") or None
+
+    # 备忘：明确要求记住的内容直接追加进长期记忆笔记
+    memory_added = None
+    mem_add = data.get("memory_add")
+    if isinstance(mem_add, str) and mem_add.strip():
+        memory_added = mem_add.strip()[:300]
+        with db() as c:
+            row_m = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
+            base_s = ((row_m["summary"] if row_m else "") or "").rstrip()
+            new_s = (base_s + ("\n" if base_s else "") + "* [%s] %s" % (date.today().isoformat(), memory_added))[:8000]
+            if row_m:
+                c.execute("UPDATE chat_memory SET summary=?, updated=? WHERE user_id=?",
+                          (new_s, int(time.time()), uid))
+            else:
+                c.execute("INSERT INTO chat_memory (user_id, summary, last_msg_id, updated) VALUES (?,?,0,?)",
+                          (uid, new_s, int(time.time())))
+
+    # 定时提醒：解析并入库
+    reminder_set = None
+    rem = data.get("reminder") if isinstance(data.get("reminder"), dict) else None
+    if rem:
+        try:
+            rtype = rem.get("type")
+            rtext = str(rem.get("text") or "").strip()[:200]
+            if rtype in ("once", "daily", "weekly") and rtext:
+                if rtype == "once":
+                    dt = datetime.strptime(str(rem.get("datetime")), "%Y-%m-%d %H:%M")
+                    fire, weekday_v, time_v = int(dt.timestamp()), None, dt.strftime("%H:%M")
+                else:
+                    time_v = str(rem.get("time") or "09:00")
+                    weekday_v = int(rem.get("weekday") or 0) if rtype == "weekly" else None
+                    fire = next_fire(rtype, weekday_v, time_v)
+                if fire > time.time():
+                    with db() as c:
+                        cur = c.execute(
+                            "INSERT INTO reminders (user_id, text, rtype, weekday, time, fire_at, active, created) "
+                            "VALUES (?,?,?,?,?,?,1,?)",
+                            (uid, rtext, rtype, weekday_v, time_v, fire, int(time.time())),
+                        )
+                    reminder_set = {"id": cur.lastrowid, "text": rtext, "rtype": rtype,
+                                    "weekday": weekday_v, "time": time_v, "fire_at": fire}
+                    reminder_set["label"] = schedule_label(reminder_set)
+        except Exception as e:
+            sys.stderr.write("reminder parse failed: %s (%r)\n" % (e, rem))
+
     if level == "strict" and not fix:
         # 严格模式下主回复没给纠错时，用低温度的专职语法检查兜底
         try:
@@ -654,7 +841,8 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
     if photo_id:
         threading.Thread(target=tag_photo, args=(int(photo_id), text, photo_desc, reply), daemon=True).start()
     threading.Thread(target=maybe_summarize, args=(uid,), daemon=True).start()
-    return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None}
+    return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None,
+            "memory_added": memory_added, "reminder_set": reminder_set}
 
 
 def check_password(user, pw):
@@ -824,6 +1012,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_photo_upload()
             if p == "/api/photos/organize":
                 return self.api_photo_organize()
+            if p == "/api/push/subscribe":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                sub = self.body_json().get("subscription") or {}
+                if not sub.get("endpoint"):
+                    return self.fail("bad subscription")
+                with db() as c:
+                    c.execute(
+                        "INSERT INTO push_subs (user_id, endpoint, sub_json, created) VALUES (?,?,?,?) "
+                        "ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, sub_json=excluded.sub_json",
+                        (user["id"], sub["endpoint"], json.dumps(sub), int(time.time())),
+                    )
+                return self.send_json({"ok": True})
+            if p == "/api/push/test":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                n = push_to_user(user["id"], "Buddy 提醒", "通知已打通！到点提醒会像这样出现。")
+                return self.send_json({"sent": n})
             m = re.match(r"^/api/rescore/(\d+)$", p)
             if m:
                 return self.api_rescore(int(m.group(1)))
@@ -867,6 +1075,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with db() as c:
                 c.execute("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
                 c.execute("DELETE FROM chat_memory WHERE user_id=?", (user["id"],))
+            return self.send_json({"ok": True})
+        mr = re.match(r"^/api/reminders/(\d+)$", self.qpath())
+        if mr:
+            user = self.auth()
+            if not user:
+                return self.fail("unauthorized", 401)
+            with db() as c:
+                c.execute("UPDATE reminders SET active=0 WHERE id=? AND user_id=?", (int(mr.group(1)), user["id"]))
             return self.send_json({"ok": True})
         mp = re.match(r"^/api/photos/(\d+)$", self.qpath())
         if mp:
@@ -961,6 +1177,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "summary": (mem["summary"] if mem else "") or "",
                     "updated": mem["updated"] if mem else None,
                 })
+            if p == "/api/push/key":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                if not push_available():
+                    return self.fail("服务器未安装 pywebpush")
+                return self.send_json({"key": vapid_public_b64()})
+            if p == "/api/reminders":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                with db() as c:
+                    rows = [dict(r) for r in c.execute(
+                        "SELECT id, text, rtype, weekday, time, fire_at, active FROM reminders "
+                        "WHERE user_id=? AND active=1 ORDER BY fire_at ASC", (user["id"],)).fetchall()]
+                for r in rows:
+                    r["label"] = schedule_label(r)
+                with db() as c:
+                    nsub = c.execute("SELECT COUNT(*) FROM push_subs WHERE user_id=?", (user["id"],)).fetchone()[0]
+                return self.send_json({"items": rows, "push_devices": nsub})
             if p == "/api/chat/history":
                 user = self.auth()
                 if not user:
@@ -1429,7 +1665,9 @@ def main():
     else:
         print("Whisper: not installed, falling back to browser transcripts")
     threading.Thread(target=auto_organize_loop, daemon=True).start()
+    threading.Thread(target=reminders_loop, daemon=True).start()
     print("Vision: %s" % ((VISION_PROVIDER + " / " + (DEEPSEEK_VISION_MODEL if VISION_PROVIDER == "deepseek" else QWEN_VISION_MODEL)) if vision_available() else "off"))
+    print("Push: %s" % ("on" if push_available() else "off — pip3 install --user pywebpush"))
     handler = functools.partial(Handler, directory=BASE)
     cert, key = os.path.join(BASE, "cert.pem"), os.path.join(BASE, "key.pem")
     if os.path.exists(cert) and os.path.exists(key):

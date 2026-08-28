@@ -785,6 +785,13 @@ async function renderChat() {
       if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null, resp.typed_note || note, resp._photoUrl);
       else if (ph) ph.remove();
       append(chatBubble("ai", resp.reply, resp.fix));
+      if (resp.memory_added) append(`<div class="msg ai"><div class="chat-note">已记入长期记忆：${esc(resp.memory_added)}</div></div>`);
+      if (resp.reminder_set) {
+        const needPush = !("Notification" in window) || Notification.permission !== "granted";
+        append(`<div class="msg ai"><div class="chat-note">已设置提醒：${esc(resp.reminder_set.label)} · ${esc(resp.reminder_set.text)}${needPush ? `<button class="link-btn note-push-btn">开启通知</button>` : ""}</div></div>`);
+        const pb = box() && box().querySelector(".note-push-btn:last-of-type");
+        if (pb) pb.onclick = async () => { if (await enablePush()) pb.replaceWith("（通知已开启）"); };
+      }
       reply = resp.reply;
     } catch (e) {
       const ph = document.getElementById(placeholderId);
@@ -877,7 +884,33 @@ async function renderChat() {
   };
 }
 
-/* ============ Tab：长期记忆（记忆笔记 + 图库） ============ */
+/* ============ Web Push 订阅 ============ */
+function urlB64ToUint8(s) {
+  const pad = "=".repeat((4 - (s.length % 4)) % 4);
+  const b = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from([...b].map((c) => c.charCodeAt(0)));
+}
+
+async function enablePush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    alert("此浏览器不支持推送通知。iPhone 需将本应用添加到主屏幕后在 App 内开启（iOS 16.4+）。");
+    return false;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { alert("通知权限未授予。"); return false; }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const { key } = await api("/api/push/key");
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(key) });
+    await api("/api/push/subscribe", { json: { subscription: sub.toJSON() } });
+    return true;
+  } catch (e) {
+    alert("订阅失败：" + e.message);
+    return false;
+  }
+}
+
+/* ============ Tab：长期记忆（记忆笔记 + 提醒 + 图库） ============ */
 let memSub = "notes";
 async function renderMemory() {
   if (!AUTH.user) return renderAuth();
@@ -887,6 +920,7 @@ async function renderMemory() {
       <p class="desc">Buddy 关于你的持久记忆：对话攒多了自动归纳；清空对话时也会先提炼保留。图库照片同属长期记忆，不受对话清空影响。</p>
       <div class="pill-row">
         <button class="pill ${memSub === "notes" ? "active" : ""}" data-sub="notes">记忆笔记</button>
+        <button class="pill ${memSub === "reminders" ? "active" : ""}" data-sub="reminders">提醒</button>
         <button class="pill ${memSub === "gallery" ? "active" : ""}" data-sub="gallery">图库</button>
       </div>
       <div id="memBody"><p class="desc">加载中……</p></div>
@@ -895,7 +929,45 @@ async function renderMemory() {
     p.onclick = () => { memSub = p.dataset.sub; renderMemory(); };
   });
   if (memSub === "notes") renderMemoryNotes($("#memBody"));
+  else if (memSub === "reminders") renderReminders($("#memBody"));
   else renderGalleryInto($("#memBody"));
+}
+
+async function renderReminders(root) {
+  let d;
+  try { d = await api("/api/reminders"); } catch (e) {
+    root.innerHTML = `<p class="desc">加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+  const items = d.items || [];
+  root.innerHTML = `
+    <p class="desc">在对话里直接说"提醒我……"即可创建（如 "remind me every Monday at 8pm about the project meeting"）。到点时 Buddy 会在对话里留言，并推送到已开启通知的设备。</p>
+    <div style="margin:10px 0">
+      <button class="btn secondary" id="btnEnablePush">在此设备开启通知</button>
+      <button class="btn ghost" id="btnTestPush">发测试通知</button>
+      <span class="muted-sm">已订阅设备：${d.push_devices}</span>
+    </div>
+    ${items.length ? items.map((r) => `
+      <div class="note-item">
+        <span><b>${esc(r.label)}</b> · ${esc(r.text)}<br>
+          <span class="muted-sm">下次提醒：${new Date(r.fire_at * 1000).toLocaleString("zh-CN")}</span></span>
+        <button class="note-del rem-del" data-id="${r.id}">删除</button>
+      </div>`).join("") : `<p class="desc">暂无提醒。</p>`}`;
+  $("#btnEnablePush").onclick = async () => {
+    if (await enablePush()) { alert("通知已开启！点「发测试通知」验证一下。"); renderMemory(); }
+  };
+  $("#btnTestPush").onclick = async () => {
+    try {
+      const r = await api("/api/push/test", { method: "POST", json: {} });
+      if (!r.sent) alert("没有已订阅的设备。请先点「在此设备开启通知」。");
+    } catch (e) { alert("发送失败：" + e.message); }
+  };
+  root.querySelectorAll(".rem-del").forEach((b) => {
+    b.onclick = async () => {
+      try { await api(`/api/reminders/${b.dataset.id}`, { method: "DELETE" }); renderMemory(); }
+      catch (e) { alert("删除失败：" + e.message); }
+    };
+  });
 }
 
 async function renderMemoryNotes(root) {
