@@ -1138,10 +1138,11 @@ function startVocabTest() {
     items: [],
   };
   const items = [];
+  // 跨测试轮换：pickFresh 避开最近几次测试用过的词，复测尽量不重词（降低练习效应）
   VOCAB_BANDS.forEach((b, bi) => {
-    sample(b.words, 3).forEach((w) => { items.push({ w, band: bi }); vocab.used.add(w); });
+    pickFresh("sg_vocab_b" + bi, b.words, 3, (w) => w).forEach((w) => { items.push({ w, band: bi }); vocab.used.add(w); });
   });
-  sample(VOCAB_PSEUDO, 5).forEach((w) => { items.push({ w, band: -1 }); vocab.used.add(w); });
+  pickFresh("sg_vocab_pseudo", VOCAB_PSEUDO, 5, (w) => w).forEach((w) => { items.push({ w, band: -1 }); vocab.used.add(w); });
   vocab.items = sample(items, items.length);
   renderVocabPhase();
 }
@@ -1190,12 +1191,16 @@ function renderVocabPhase() {
       }
       const items = [];
       [...frontier].filter((i) => i >= 0 && i < VOCAB_BANDS.length).forEach((bi) => {
-        VOCAB_BANDS[bi].words.filter((w) => !vocab.used.has(w)).slice(0, 5).forEach((w) => {
-          items.push({ w, band: bi });
-          vocab.used.add(w);
-        });
+        const key = "sg_vocab_b" + bi;
+        const recent = load(key, []);
+        const pool = VOCAB_BANDS[bi].words.filter((w) => !vocab.used.has(w));
+        const fresh = pool.filter((w) => !recent.includes(w));
+        const stale = pool.filter((w) => recent.includes(w));
+        const chosen = [...sample(fresh, Math.min(5, fresh.length)), ...sample(stale, Math.max(0, 5 - fresh.length))].slice(0, 5);
+        chosen.forEach((w) => { items.push({ w, band: bi }); vocab.used.add(w); });
+        save(key, [...chosen, ...recent].slice(0, VOCAB_BANDS[bi].words.length - 3));
       });
-      VOCAB_PSEUDO.filter((w) => !vocab.used.has(w)).slice(0, 7).forEach((w) => {
+      sample(VOCAB_PSEUDO.filter((w) => !vocab.used.has(w)), 7).forEach((w) => {
         items.push({ w, band: -1 });
         vocab.used.add(w);
       });
