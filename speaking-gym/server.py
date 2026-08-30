@@ -456,10 +456,71 @@ CHAT_SYSTEM_TMPL = (
     "only), time (\"HH:MM\" 24h, default \"09:00\"), datetime (\"YYYY-MM-DD HH:MM\", REQUIRED for once). Resolve "
     "relative dates using CURRENT TIME. Example: {{\"text\": \"take out the laundry\", \"type\": \"once\", "
     "\"datetime\": \"2026-08-28 21:06\"}}. Confirm the exact schedule in your reply. Otherwise null.\n"
+    "11. Topic picking: the system message may include a TOPIC MENU (a fresh random sample from the learner's own "
+    "practice-topic library, resampled every message) and a PRACTICE SNAPSHOT from their training database. When "
+    "the learner asks you to pick a topic, suggest one, or asks what to talk about, choose exactly ONE menu item — "
+    "announce it in one short sentence and ask ONE easy opening question to get them talking. If they name a "
+    "category or theme, prefer a matching menu item; if nothing matches, improvise a topic in that spirit and say "
+    "you did. During the chat, stay on the chosen topic with follow-ups unless they steer away. Use the PRACTICE "
+    "SNAPSHOT like a caring coach — mention streaks, recent scores, practiced topics or vocabulary size naturally "
+    "when relevant (praise progress, nudge gaps), but never dump raw data.\n"
     'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or '
     'null, "memory_add": "..." or null, "reminder": {{"text": "...", "type": "...", "weekday": 0, "time": "HH:MM", '
     '"datetime": "..."}} or null}}'
 )
+
+
+# ---------- 话题库（部署时由 data.js 导出 topics.json，Buddy 每回合抽样） ----------
+_TOPICS_CACHE = {"mtime": 0, "data": None}
+
+
+def load_topics():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "topics.json")
+    try:
+        mt = os.path.getmtime(p)
+        if _TOPICS_CACHE["data"] is None or mt != _TOPICS_CACHE["mtime"]:
+            with open(p, encoding="utf-8") as f:
+                _TOPICS_CACHE["data"] = json.load(f).get("categories") or []
+            _TOPICS_CACHE["mtime"] = mt
+    except OSError:
+        return []
+    return _TOPICS_CACHE["data"]
+
+
+def topic_menu_block():
+    import random
+    cats = load_topics()
+    if not cats:
+        return ""
+    stats = "; ".join("%s %d" % (c["label"], len(c["topics"])) for c in cats)
+    pool = [(c["label"], q) for c in cats for q in c["topics"]]
+    sample = random.sample(pool, min(12, len(pool)))
+    lines = "\n".join("- [%s] %s" % (lbl, q) for lbl, q in sample)
+    return ("TOPIC MENU (learner's library: %s — %d total; random sample this turn):\n%s"
+            % (stats, len(pool), lines))
+
+
+def practice_snapshot_block(uid):
+    with db() as c:
+        rows = c.execute(
+            "SELECT date, topic, ai_score FROM scores WHERE user_id=? ORDER BY ts DESC LIMIT 5", (uid,)).fetchall()
+        dates = [r["date"] for r in c.execute("SELECT date FROM scores WHERE user_id=?", (uid,)).fetchall()]
+        total = len(dates)
+        vocab = c.execute(
+            "SELECT date, estimate FROM vocab_tests WHERE user_id=? ORDER BY ts DESC LIMIT 1", (uid,)).fetchone()
+    if not total and not vocab:
+        return ""
+    parts = []
+    if total:
+        parts.append("streak %d days, %d rounds total" % (calc_streak(dates), total))
+        recent = "; ".join(
+            "%s (%s%s)" % ((r["topic"] or "?")[:60], r["date"],
+                           ", scored %s" % r["ai_score"] if r["ai_score"] is not None else "")
+            for r in rows)
+        parts.append("recent practice: " + recent)
+    if vocab:
+        parts.append("vocabulary size test: ~%s word families (%s)" % (vocab["estimate"], vocab["date"]))
+    return "PRACTICE SNAPSHOT: " + " | ".join(parts)
 
 
 def tag_user_content(content, channel, typed_note, photo_desc=None):
@@ -761,7 +822,15 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
     wd_en = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][now.weekday()]
     time_line = "CURRENT TIME: %s (%s), timezone Asia/Hong_Kong." % (now.strftime("%Y-%m-%d %H:%M"), wd_en)
     summary = (mem["summary"] if mem else "") or "(nothing yet — the conversation just started)"
-    msgs = [{"role": "system", "content": system + "\n\n" + time_line + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
+    extra = ""
+    menu = topic_menu_block()
+    if menu:
+        extra += "\n\n" + menu
+    snap = practice_snapshot_block(uid)
+    if snap:
+        extra += "\n\n" + snap
+    msgs = [{"role": "system", "content": system + "\n\n" + time_line + extra
+             + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
     for m in recent:
         if m["role"] == "assistant":
             # 历史 assistant 消息统一还原成完整 JSON 形态，让模型持续模仿全字段输出格式
