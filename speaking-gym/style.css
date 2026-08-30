@@ -200,6 +200,15 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .chat-note { max-width: 82%; background: var(--accent-soft); color: var(--accent); border-radius: 10px; padding: 7px 12px; font-size: 13px; }
 .chat-note .link-btn { margin-left: 6px; font-size: 13px; }
 
+/* 词汇量测试 */
+.vocab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 8px; margin-top: 12px; }
+.vword { border: 1.5px solid var(--border); background: #fff; border-radius: 10px; padding: 10px 6px; font-size: 15px; cursor: pointer; font-family: inherit; color: var(--ink); transition: all 0.1s; }
+.vword.sel { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.vocab-result { text-align: center; padding: 12px 0 4px; }
+.vr-num { font-size: 46px; font-weight: 800; color: var(--accent); }
+.vr-cap { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.vr-level { display: inline-block; margin-top: 8px; background: var(--accent-soft); color: var(--accent); font-weight: 700; border-radius: 999px; padding: 5px 16px; font-size: 14px; }
+
 /* 长期记忆 */
 .mem-notes { white-space: pre-wrap; background: #f8faf9; border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 14px; line-height: 1.75; }
 .danger-btn { border-color: var(--danger) !important; color: var(--danger) !important; }

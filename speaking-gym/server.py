@@ -125,6 +125,13 @@ def init_db():
             endpoint TEXT UNIQUE,
             sub_json TEXT, created INTEGER
         );
+        CREATE TABLE IF NOT EXISTS vocab_tests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ts INTEGER, date TEXT,
+            estimate INTEGER, low INTEGER, high INTEGER,
+            overclaim REAL, details TEXT
+        );
         """)
         c.executescript("""
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -1012,6 +1019,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_photo_upload()
             if p == "/api/photos/organize":
                 return self.api_photo_organize()
+            if p == "/api/vocab":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                d = self.body_json()
+                try:
+                    est = max(0, min(45000, int(d.get("estimate") or 0)))
+                    low = max(0, min(45000, int(d.get("low") or 0)))
+                    high = max(0, min(45000, int(d.get("high") or 0)))
+                    oc = max(0.0, min(1.0, float(d.get("overclaim") or 0)))
+                except (TypeError, ValueError):
+                    return self.fail("bad payload")
+                with db() as c:
+                    c.execute(
+                        "INSERT INTO vocab_tests (user_id, ts, date, estimate, low, high, overclaim, details) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (user["id"], int(time.time() * 1000), date.today().isoformat(),
+                         est, low, high, oc, json.dumps(d.get("details") or {}, ensure_ascii=False)[:20000]),
+                    )
+                return self.send_json({"ok": True})
             if p == "/api/push/subscribe":
                 user = self.auth()
                 if not user:
@@ -1177,6 +1204,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "summary": (mem["summary"] if mem else "") or "",
                     "updated": mem["updated"] if mem else None,
                 })
+            if p == "/api/vocab/history":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                with db() as c:
+                    rows = [dict(r) for r in c.execute(
+                        "SELECT id, ts, date, estimate, low, high, overclaim FROM vocab_tests "
+                        "WHERE user_id=? ORDER BY ts DESC LIMIT 20", (user["id"],)).fetchall()]
+                return self.send_json({"items": rows})
             if p == "/api/push/key":
                 user = self.auth()
                 if not user:

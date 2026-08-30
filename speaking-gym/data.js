@@ -1013,3 +1013,26 @@ const PHRASES = [
 
 // ============ 填充词列表 ============
 const FILLERS = ["um", "uh", "er", "erm", "hmm", "you know", "i mean", "like"];
+
+// ============ 词汇量测试：频率分层词库 ============
+// 每档 8 个真词，rank 为该档在词频表中的近似区间（词族 word families）
+const VOCAB_BANDS = [
+  { lo: 0, hi: 1000, words: ["question", "morning", "problem", "together", "window", "family", "answer", "water"] },
+  { lo: 1000, hi: 2000, words: ["comfortable", "employee", "atmosphere", "definitely", "appointment", "request", "describe", "foreign"] },
+  { lo: 2000, hi: 3000, words: ["contribute", "boundary", "adequate", "distinguish", "permanent", "transition", "acquire", "retain"] },
+  { lo: 3000, hi: 4000, words: ["evaluate", "negotiate", "remarkable", "sufficient", "incident", "distribute", "considerable", "astonish"] },
+  { lo: 4000, hi: 5000, words: ["accumulate", "feasible", "plausible", "spontaneous", "verdict", "coherent", "notorious", "deteriorate"] },
+  { lo: 5000, hi: 6500, words: ["adjacent", "condemn", "elaborate", "hinder", "intact", "scrutiny", "tangible", "bewilder"] },
+  { lo: 6500, hi: 8000, words: ["adverse", "culminate", "disparity", "eloquent", "futile", "meticulous", "pragmatic", "reproach"] },
+  { lo: 8000, hi: 10000, words: ["alleviate", "candor", "debris", "exacerbate", "frugal", "lucid", "ominous", "tepid"] },
+  { lo: 10000, hi: 12500, words: ["acrimony", "blatant", "convoluted", "dearth", "ephemeral", "gregarious", "insipid", "quell"] },
+  { lo: 12500, hi: 15000, words: ["brazen", "cacophony", "demure", "furtive", "languid", "obfuscate", "placate", "rescind"] },
+  { lo: 15000, hi: 18000, words: ["abstruse", "bellicose", "enervate", "fastidious", "harangue", "insouciant", "mellifluous", "dilatory"] },
+  { lo: 18000, hi: 22000, words: ["anodyne", "desultory", "equanimity", "feckless", "inchoate", "limpid", "probity", "truculent"] },
+  { lo: 22000, hi: 27000, words: ["apocryphal", "cavil", "dyspeptic", "festoon", "lachrymose", "palimpsest", "sedulous", "bloviate"] },
+  { lo: 27000, hi: 33000, words: ["coruscate", "crepuscular", "eldritch", "logorrhea", "nugatory", "susurrus", "tenebrous", "operose"] },
+  { lo: 33000, hi: 40000, words: ["widdershins", "divagate", "funambulist", "anfractuous", "apotropaic", "borborygmus", "callipygian", "sesquipedalian"] },
+];
+
+// 伪词（防虚报校正）：形似英语但不存在的词，勾选它们会触发猜测率扣正
+const VOCAB_PSEUDO = ["brandle", "plithe", "vintle", "quenty", "morvane", "sarpled", "crandish", "loftern", "destrile", "pontanous", "tremify", "glimber"];

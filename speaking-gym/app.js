@@ -1060,6 +1060,202 @@ async function renderGalleryInto(root) {
   });
 }
 
+/* ============ 词汇量测试 ============ */
+/* 估算模型：伪词虚报校正 → 逻辑斯蒂曲线拟合（认识率随词频衰减的 S 曲线，
+   全局拟合可压制单个罕见档的噪声）→ 数值积分得词汇量 → 参数化自助法给置信区间 */
+function vocabEstimate(shown, known, fakeShown, fakeKnown) {
+  const c = fakeShown ? fakeKnown / fakeShown : 0;
+  const mids = VOCAB_BANDS.map((b) => (b.lo + b.hi) / 2);
+  const pObs = VOCAB_BANDS.map((_, i) => {
+    if (!shown[i]) return null;
+    const raw = known[i] / shown[i];
+    return Math.max(0, Math.min(1, c < 1 ? (raw - c) / (1 - c) : 0));
+  });
+  const logistic = (r, v, s) => 1 / (1 + Math.exp((r - v) / s));
+  const fit = (ps) => {
+    let best = { err: Infinity, v: 2000, s: 800 };
+    for (let v = 250; v <= 42000; v += 250) {
+      for (const s of [200, 400, 800, 1500, 3000, 6000]) {
+        let err = 0;
+        for (let i = 0; i < mids.length; i++) {
+          if (ps[i] == null) continue;
+          const d = ps[i] - logistic(mids[i], v, s);
+          err += (shown[i] || 1) * d * d;
+        }
+        if (err < best.err) best = { err, v, s };
+      }
+    }
+    return best;
+  };
+  const integrate = (v, s) => {
+    let sum = 0;
+    for (let r = 25; r < 42000; r += 50) sum += 50 * logistic(r, v, s);
+    return sum;
+  };
+  const best = fit(pObs);
+  const est = integrate(best.v, best.s);
+  const boots = [];
+  for (let t = 0; t < 60; t++) {
+    const ps = mids.map((m, i) => {
+      if (pObs[i] == null) return null;
+      const pTrue = logistic(m, best.v, best.s);
+      let k = 0;
+      for (let j = 0; j < shown[i]; j++) if (Math.random() < pTrue) k++;
+      return k / shown[i];
+    });
+    const b2 = fit(ps);
+    boots.push(integrate(b2.v, b2.s));
+  }
+  boots.sort((a, b) => a - b);
+  const round50 = (x) => Math.max(0, Math.round(x / 50) * 50);
+  return {
+    estimate: round50(est),
+    low: round50(Math.min(boots[Math.floor(boots.length * 0.1)], est)),
+    high: round50(Math.max(boots[Math.floor(boots.length * 0.9)], est)),
+    overclaim: c,
+    p: mids.map((m) => logistic(m, best.v, best.s)),
+  };
+}
+
+function vocabLevel(n) {
+  if (n < 1500) return "A1-A2 入门";
+  if (n < 3500) return "A2-B1 初中级";
+  if (n < 5500) return "B1-B2 中级";
+  if (n < 9000) return "B2 中高级";
+  if (n < 14000) return "C1 高级";
+  if (n < 20000) return "C1-C2 精通";
+  return "C2 · 接近母语者";
+}
+
+let vocab = null;
+function startVocabTest() {
+  vocab = {
+    phase: 1,
+    shown: VOCAB_BANDS.map(() => 0),
+    known: VOCAB_BANDS.map(() => 0),
+    fakeShown: 0, fakeKnown: 0,
+    used: new Set(),
+    items: [],
+  };
+  const items = [];
+  VOCAB_BANDS.forEach((b, bi) => {
+    sample(b.words, 3).forEach((w) => { items.push({ w, band: bi }); vocab.used.add(w); });
+  });
+  sample(VOCAB_PSEUDO, 5).forEach((w) => { items.push({ w, band: -1 }); vocab.used.add(w); });
+  vocab.items = sample(items, items.length);
+  renderVocabPhase();
+}
+
+function renderVocabPhase() {
+  view.innerHTML = `
+    <div class="card">
+      <span class="step-tag">词汇量测试 · 第 ${vocab.phase} / 2 轮（共 ${vocab.items.length} 个词）</span>
+      <h2>${vocab.phase === 1 ? "点亮你认识的单词" : "第二轮：精确定位你的词汇边界"}</h2>
+      <p class="desc">只点你<b>知道至少一个意思</b>的词（不要求会拼写发音）。测试混有不存在的"伪词"，乱点会被数学扣正——诚实点击，结果才准。</p>
+      <div class="vocab-grid">
+        ${vocab.items.map((it, i) => `<button class="vword" data-i="${i}">${esc(it.w)}</button>`).join("")}
+      </div>
+      <div style="margin-top:14px">
+        <button class="btn" id="vocabNext">${vocab.phase === 1 ? "下一轮" : "查看结果"}</button>
+        <button class="btn ghost" id="vocabQuit">退出测试</button>
+      </div>
+    </div>`;
+  view.querySelectorAll(".vword").forEach((b) => {
+    b.onclick = () => b.classList.toggle("sel");
+  });
+  $("#vocabQuit").onclick = () => { vocab = null; renderProgress(); };
+  $("#vocabNext").onclick = () => {
+    view.querySelectorAll(".vword").forEach((b) => {
+      const it = vocab.items[+b.dataset.i];
+      const checked = b.classList.contains("sel");
+      if (it.band === -1) {
+        vocab.fakeShown++;
+        if (checked) vocab.fakeKnown++;
+      } else {
+        vocab.shown[it.band]++;
+        if (checked) vocab.known[it.band]++;
+      }
+    });
+    if (vocab.phase === 1) {
+      const c = vocab.fakeShown ? vocab.fakeKnown / vocab.fakeShown : 0;
+      const frontier = new Set();
+      VOCAB_BANDS.forEach((b, i) => {
+        const raw = vocab.shown[i] ? vocab.known[i] / vocab.shown[i] : 0;
+        const p = Math.max(0, Math.min(1, c < 1 ? (raw - c) / (1 - c) : 0));
+        if (p > 0.05 && p < 0.95) { frontier.add(i - 1); frontier.add(i); frontier.add(i + 1); }
+      });
+      if (!frontier.size) {
+        const allKnown = vocab.known.reduce((a, b) => a + b, 0) > vocab.shown.reduce((a, b) => a + b, 0) * 0.8;
+        (allKnown ? [11, 12, 13, 14] : [0, 1, 2, 3]).forEach((i) => frontier.add(i));
+      }
+      const items = [];
+      [...frontier].filter((i) => i >= 0 && i < VOCAB_BANDS.length).forEach((bi) => {
+        VOCAB_BANDS[bi].words.filter((w) => !vocab.used.has(w)).slice(0, 5).forEach((w) => {
+          items.push({ w, band: bi });
+          vocab.used.add(w);
+        });
+      });
+      VOCAB_PSEUDO.filter((w) => !vocab.used.has(w)).slice(0, 7).forEach((w) => {
+        items.push({ w, band: -1 });
+        vocab.used.add(w);
+      });
+      vocab.phase = 2;
+      vocab.items = sample(items, items.length);
+      renderVocabPhase();
+    } else {
+      finishVocabTest();
+    }
+  };
+}
+
+async function finishVocabTest() {
+  const r = vocabEstimate(vocab.shown, vocab.known, vocab.fakeShown, vocab.fakeKnown);
+  const details = {
+    bands: VOCAB_BANDS.map((b, i) => ({ lo: b.lo, hi: b.hi, shown: vocab.shown[i], known: vocab.known[i] })),
+    fakeShown: vocab.fakeShown, fakeKnown: vocab.fakeKnown,
+  };
+  try {
+    await api("/api/vocab", { json: { estimate: r.estimate, low: r.low, high: r.high, overclaim: r.overclaim, details } });
+  } catch (_) {}
+  let hist = [];
+  try { hist = (await api("/api/vocab/history")).items || []; } catch (_) {}
+  const maxP = 1;
+  view.innerHTML = `
+    <div class="card">
+      <span class="step-tag">词汇量测试 · 结果</span>
+      <div class="vocab-result">
+        <div class="vr-num">${r.estimate.toLocaleString()}</div>
+        <div class="vr-cap">估计词汇量（词族） · 80% 置信区间 ${r.low.toLocaleString()} – ${r.high.toLocaleString()}</div>
+        <div class="vr-level">${vocabLevel(r.estimate)}</div>
+      </div>
+      ${r.overclaim > 0.15 ? `<p class="desc" style="color:var(--danger)">注意：你勾选了 ${vocab.fakeKnown} 个不存在的伪词（虚报率 ${(r.overclaim * 100).toFixed(0)}%），结果已按猜测率扣正。下次更严格地只点真正认识的词，估计会更准。</p>` : ""}
+      <h2 style="margin-top:16px">各频段认识率</h2>
+      <div class="bars">
+        ${r.p.map((p, i) => `<div class="bar" style="height:${Math.max(4, (p / maxP) * 100)}%"><span class="bar-tip">${Math.round(p * 100)}%</span></div>`).join("")}
+      </div>
+      <p class="muted-sm">横轴：词频从常见（左，前 1000 词）到罕见（右，第 33000-40000 词）</p>
+      <h2 style="margin-top:18px">参照系</h2>
+      <table>
+        <tr><th>参照</th><th>大约词汇量（词族）</th></tr>
+        <tr><td>CET-4 大学四级</td><td>4,000 – 4,500</td></tr>
+        <tr><td>CET-6 大学六级 / 考研</td><td>5,500 – 6,500</td></tr>
+        <tr><td>雅思 6.5 – 7</td><td>7,000 – 9,000</td></tr>
+        <tr><td>英语母语成年人</td><td>20,000 – 35,000</td></tr>
+      </table>
+      ${hist.length > 1 ? `
+        <h2 style="margin-top:18px">历史成绩</h2>
+        ${hist.map((h) => `<div class="note-item"><span>${h.date} · <b>${h.estimate.toLocaleString()}</b>（${h.low.toLocaleString()}–${h.high.toLocaleString()}）</span></div>`).join("")}` : ""}
+      <p class="muted-sm" style="margin-top:12px">方法说明：频率分层抽样 + 伪词虚报校正 + 保序回归平滑。测量的是<b>书面接受性词汇</b>（认识≠会用）；自测类测试通常有 ±10-15% 波动，建议每 1-2 个月复测看趋势。</p>
+      <div style="margin-top:14px">
+        <button class="btn" id="vocabAgain">再测一次</button>
+        <button class="btn secondary" id="vocabBack">返回进度</button>
+      </div>
+    </div>`;
+  $("#vocabAgain").onclick = startVocabTest;
+  $("#vocabBack").onclick = () => renderProgress();
+  vocab = null;
+}
+
 function renderAiBox(resp) {
   const box = $("#aiBox");
   if (!box) return;
@@ -1197,10 +1393,10 @@ function svgLine(vals, labels) {
 async function renderProgress() {
   if (!AUTH.user) return renderAuth();
   view.innerHTML = `<div class="card"><p class="desc">加载中……</p></div>`;
-  let scores = { items: [], streak: 0 }, mine = { items: [] }, pub = { items: [] }, me = AUTH.user;
+  let scores = { items: [], streak: 0 }, mine = { items: [] }, pub = { items: [] }, me = AUTH.user, vhist = { items: [] };
   try {
-    [scores, mine, pub, me] = await Promise.all([
-      api("/api/scores"), api("/api/recordings"), api("/api/public-recordings"), api("/api/me"),
+    [scores, mine, pub, me, vhist] = await Promise.all([
+      api("/api/scores"), api("/api/recordings"), api("/api/public-recordings"), api("/api/me"), api("/api/vocab/history"),
     ]);
     AUTH.user = me;
   } catch (e) {
@@ -1232,6 +1428,17 @@ async function renderProgress() {
         </div>` : ""}
     </div>
     <div class="card">
+      <div class="chat-head">
+        <div>
+          <h2>词汇量</h2>
+          ${vhist.items.length
+            ? `<p class="desc">最近一次（${vhist.items[0].date}）：<b style="font-size:18px">${vhist.items[0].estimate.toLocaleString()}</b> 词族（${vhist.items[0].low.toLocaleString()}–${vhist.items[0].high.toLocaleString()}）· ${vocabLevel(vhist.items[0].estimate)}${vhist.items.length > 1 ? ` · 上上次 ${vhist.items[1].estimate.toLocaleString()}` : ""}</p>`
+            : `<p class="desc">还没测过。约 5 分钟：两轮自适应勾选 + 伪词防虚报校正，测你的书面接受性词汇量。</p>`}
+        </div>
+        <button class="btn secondary" id="btnVocabTest">${vhist.items.length ? "再测一次" : "开始测试"}</button>
+      </div>
+    </div>
+    <div class="card">
       <h2>设置</h2>
       <label class="toggle-row">
         <input type="checkbox" id="pubToggle" ${me.public_audio ? "checked" : ""}>
@@ -1258,6 +1465,7 @@ async function renderProgress() {
           <span class="note-date">${n.date}<button class="note-del" data-i="${i}">删除</button></span>
         </div>`).join("") : `<p class="desc">暂无记录。完成每日练习的复盘步骤后会自动收集到这里。</p>`}
     </div>`;
+  $("#btnVocabTest").onclick = startVocabTest;
   $("#pubToggle").onchange = async (e) => {
     const val = e.target.checked;
     try {
