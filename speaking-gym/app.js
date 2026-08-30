@@ -1279,7 +1279,7 @@ function renderTopicPick() {
     <div class="card">
       ${stepHeader(2)}
       <h2>选择今天的话题类别</h2>
-      <p class="desc">建议按周轮换：周一日常 / 周二职场 / 周三深度 / 周四情景演练……不确定就点「随机」。同类话题轮完一遍才会重复。情景演练是角色扮演：把 AI 想象成对方，直接开口演。</p>
+      <p class="desc">建议按周轮换：周一日常 / 周二职场 / 周三深度 / 周四情景演练 / 周五科技与AI / 周六时事与观点 / 周日自由选。同类话题轮完一遍才会重复。情景演练是角色扮演；科技与时事类适合练"观点+论证"的表达结构。</p>
       <div class="pill-row">
         ${Object.entries(TOPICS).map(([k, v]) => `<button class="pill" data-cat="${k}">${v.label}</button>`).join("")}
         <button class="pill" data-cat="random">随机</button>
