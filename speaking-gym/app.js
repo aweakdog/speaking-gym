@@ -1411,6 +1411,17 @@ async function renderProgress() {
   const maxWpm = Math.max(60, ...wpmBars.map((b) => b.wpm));
   view.innerHTML = `
     <div class="card">
+      <div class="chat-head">
+        <div>
+          <h2>词汇量</h2>
+          ${vhist.items.length
+            ? `<p class="desc">最近一次（${vhist.items[0].date}）：<b style="font-size:18px">${vhist.items[0].estimate.toLocaleString()}</b> 词族（${vhist.items[0].low.toLocaleString()}–${vhist.items[0].high.toLocaleString()}）· ${vocabLevel(vhist.items[0].estimate)}${vhist.items.length > 1 ? ` · 上上次 ${vhist.items[1].estimate.toLocaleString()}` : ""}</p>`
+            : `<p class="desc">还没测过。约 5 分钟：两轮自适应勾选 + 伪词防虚报校正，测你的书面接受性词汇量。</p>`}
+        </div>
+        <button class="btn secondary" id="btnVocabTest">${vhist.items.length ? "再测一次" : "开始测试"}</button>
+      </div>
+    </div>
+    <div class="card">
       <h2>练习数据</h2>
       <div class="stats-row">
         <div class="stat"><div class="num">${scores.streak}</div><div class="cap">连续天数</div></div>
@@ -1426,17 +1437,6 @@ async function renderProgress() {
         <div class="bars">
           ${wpmBars.map((b) => `<div class="bar" style="height:${Math.max(6, (b.wpm / maxWpm) * 100)}%"><span class="bar-tip">${b.wpm}</span></div>`).join("")}
         </div>` : ""}
-    </div>
-    <div class="card">
-      <div class="chat-head">
-        <div>
-          <h2>词汇量</h2>
-          ${vhist.items.length
-            ? `<p class="desc">最近一次（${vhist.items[0].date}）：<b style="font-size:18px">${vhist.items[0].estimate.toLocaleString()}</b> 词族（${vhist.items[0].low.toLocaleString()}–${vhist.items[0].high.toLocaleString()}）· ${vocabLevel(vhist.items[0].estimate)}${vhist.items.length > 1 ? ` · 上上次 ${vhist.items[1].estimate.toLocaleString()}` : ""}</p>`
-            : `<p class="desc">还没测过。约 5 分钟：两轮自适应勾选 + 伪词防虚报校正，测你的书面接受性词汇量。</p>`}
-        </div>
-        <button class="btn secondary" id="btnVocabTest">${vhist.items.length ? "再测一次" : "开始测试"}</button>
-      </div>
     </div>
     <div class="card">
       <h2>设置</h2>
