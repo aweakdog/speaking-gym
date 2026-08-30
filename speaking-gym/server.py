@@ -925,6 +925,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 60  # 防止慢速/恶意连接长期占用工作线程
 
+    def end_headers(self):
+        # 代码类静态资源禁止启发式缓存：每次都向服务器校验，保证部署即生效
+        try:
+            p = urllib.parse.urlparse(self.path).path
+            if not p.startswith("/api/") and (p == "/" or re.search(r"\.(html|js|css|webmanifest)$", p)):
+                self.send_header("Cache-Control", "no-cache")
+        except Exception:
+            pass
+        super().end_headers()
+
     # --- 工具 ---
     def send_json(self, obj, code=200):
         raw = json.dumps(obj, ensure_ascii=False).encode()

@@ -1,5 +1,5 @@
 /* Service Worker：静态资源网络优先（保证更新及时）、断网时用缓存兜底；API 永不缓存；接收 Web Push */
-const VERSION = "sg-v2";
+const VERSION = "sg-v3";
 const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/data.js", "/manifest.webmanifest",
   "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"];
 
