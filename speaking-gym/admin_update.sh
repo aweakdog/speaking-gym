@@ -9,10 +9,14 @@ LIVE="$(cd "$(dirname "$0")" && pwd)"
 DATA="${SG_DATA_DIR:-$HOME/speaking-gym-data}"
 MARKER="$DATA/deployed-commit"
 LOCK="$DATA/admin-update.lock"
+NODE="$HOME/.local/node/bin/node"
 
 mkdir -p "$DATA"
 exec 9>"$LOCK"
 flock -n 9 || { echo "another update is already running"; exit 20; }
+[[ -x "$NODE" ]] || { echo "Node.js 18+ is required at $NODE"; exit 26; }
+node_major="$($NODE -p 'process.versions.node.split(".")[0]')"
+(( node_major >= 18 )) || { echo "Node.js 18+ required, found $($NODE --version)"; exit 26; }
 
 export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
 export GIT_CONFIG_GLOBAL=/dev/null
@@ -61,13 +65,13 @@ for base, dirs, files in os.walk(root):
             raise SystemExit("refusing repository containing secret/data file: " + path)
 PY
 
-node --check "$stage/app.js"
-node --check "$stage/data.js"
-node --check "$stage/sw.js"
+"$NODE" --check "$stage/app.js"
+"$NODE" --check "$stage/data.js"
+"$NODE" --check "$stage/sw.js"
 python3 -c "import ast; ast.parse(open('$stage/server.py').read())"
 (
   cd "$stage"
-  node -e "
+  "$NODE" -e "
 const fs = require('fs');
 eval(fs.readFileSync('data.js','utf8') + \`
 fs.writeFileSync('topics.json', JSON.stringify({

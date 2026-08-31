@@ -57,7 +57,7 @@ python3 tools/emergency_admin.py status
 9. 只同步应用代码，不接触证书、数据库、日志、`run.sh`、`admin_update.sh` 和数据目录；应急更新脚本自身只能通过正常 SSH 部署更新；
 10. 写入已部署提交编号，等待单独的 `restart` 动作。
 
-同一时刻只允许一个改变状态的管理动作运行。
+同一时刻只允许一个改变状态的管理动作运行。服务器使用用户目录下的 `~/.local/node/bin/node`（Node.js 18+）执行现代 JavaScript 语法检查；当前固定安装的版本为 Node.js 20.20.2 LTS，安装包经过 nodejs.org 官方 SHA-256 校验，不替换系统 Node。
 
 ## 认证与 TLS
 
