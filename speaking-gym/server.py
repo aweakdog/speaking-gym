@@ -59,7 +59,10 @@ def vision_available():
     return (VISION_PROVIDER == "deepseek" and bool(DEEPSEEK_KEY)) or (VISION_PROVIDER == "qwen" and bool(QWEN_KEY))
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
-STATIC_ALLOWED = re.compile(r"^/(?:$|[^?]*\.(?:html|css|js|webmanifest|png|jpg|jpeg|svg|webp|ico))$")
+STATIC_ALLOWED = re.compile(
+    r"^/(?:$|index\.html|style\.css|(?:app|data|sw)\.js|manifest\.webmanifest|"
+    r"icons/[^/]+\.(?:png|jpg|jpeg|svg|webp|ico))$"
+)
 
 
 # ---------- 数据库 ----------

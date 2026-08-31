@@ -54,7 +54,7 @@ python3 tools/emergency_admin.py status
 6. 拒绝仓库中出现 `.pem`、`.db` 或 `config.json`；
 7. 检查 JavaScript 和 Python 语法，并用 Python 验证已提交的 `topics.json` 结构；它由可信的本地 `deploy.sh` 在提交前生成，应急更新不会提前执行刚下载的 `data.js`；
 8. 拒绝符号链接，并以 `rsync --no-links` 再做一次防护；
-9. 只同步应用代码，不接触证书、数据库、日志、`run.sh`、`admin_update.sh` 和数据目录；应急更新脚本自身只能通过正常 SSH 部署更新；
+9. 只同步运行必需的应用代码，不同步本地工具或 Markdown 文档，也不接触证书、数据库、日志、`run.sh`、`admin_update.sh` 和数据目录；应急更新脚本自身只能通过正常 SSH 部署更新；
 10. 写入已部署提交编号，等待单独的 `restart` 动作。
 
 同一时刻只允许一个改变状态的管理动作运行。服务器使用用户目录下的 `~/.local/node/bin/node`（Node.js 18+）执行现代 JavaScript 语法检查；当前固定安装的版本为 Node.js 20.20.2 LTS，安装包经过 nodejs.org 官方 SHA-256 校验，不替换系统 Node。

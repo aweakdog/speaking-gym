@@ -313,6 +313,8 @@ rsync -a --no-links \
   --exclude='*.pem' \
   --exclude='*.db' \
   --exclude='*.log' \
+  --exclude='*.md' \
+  --exclude='tools/' \
   --exclude='run.sh' \
   --exclude='admin_update.sh' \
   "$STAGE/" "$LIVE/"
@@ -426,15 +428,16 @@ for value in (api_key_1, api_key_2, admin_token):
 - 运维文档；
 - 内部导出数据。
 
-仅靠禁止 `.db` 和 `.pem` 不够。更稳妥的是只允许浏览器真正需要的扩展名：
+仅靠禁止 `.db` 和 `.pem` 不够；只按 `.js` 等扩展名放行也不够，因为 `tools/` 中的本地脚本可能同样是 JavaScript。更稳妥的是允许明确的运行文件名和资产目录：
 
 ```python
 STATIC_ALLOWED = re.compile(
-    r"^/(?:$|[^?]*\.(?:html|css|js|webmanifest|png|jpg|jpeg|svg|webp|ico))$"
+    r"^/(?:$|index\.html|style\.css|(?:app|data|sw)\.js|manifest\.webmanifest|"
+    r"icons/[^/]+\.(?:png|jpg|jpeg|svg|webp|ico))$"
 )
 ```
 
-API 路由和证书下载应在静态处理之前显式匹配；其他路径统一返回 404。还应禁止目录列表。允许列表必须按项目的实际前端资产调整：如果确实使用 `.woff2`、`.ttf` 等字体，应明确加入；不要为了修复一个 404 又退回“允许所有未知扩展名”。
+API 路由和证书下载应在静态处理之前显式匹配；其他路径统一返回 404。还应禁止目录列表，并在部署阶段不复制本地工具和运维文档。允许列表必须按项目的实际前端资产调整：如果确实使用 `.woff2`、`.ttf` 等字体，应明确加入对应文件或专用目录；不要为了修复一个 404 又退回“允许所有未知文件”。
 
 ---
 

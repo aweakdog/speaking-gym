@@ -87,7 +87,7 @@ for category in categories:
 print("topics.json validated: %d topics" % total)
 PY
 
-rsync -a --no-links --exclude='*.pem' --exclude='*.db' --exclude='*.log' --exclude='run.sh' --exclude='admin_update.sh' "$stage/" "$LIVE/"
+rsync -a --no-links --exclude='*.pem' --exclude='*.db' --exclude='*.log' --exclude='*.md' --exclude='tools/' --exclude='run.sh' --exclude='start.sh' --exclude='deploy.sh' --exclude='admin_update.sh' "$stage/" "$LIVE/"
 printf '%s\n' "$target" > "$MARKER"
 echo "deployed: $target"
 echo "restart required"
