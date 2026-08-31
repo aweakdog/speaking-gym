@@ -5,7 +5,10 @@ import hmac
 import http.client
 import json
 import os
+import secrets
 import ssl
+import stat
+import time
 import urllib.parse
 
 DEFAULT_URL = "https://143.89.46.41:1511"
@@ -16,6 +19,9 @@ FINGERPRINT_FILE = os.path.join(CONFIG_DIR, "server-cert.sha256")
 
 def read_secret(path):
     try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise SystemExit("Insecure owner or permissions on " + path)
         value = open(path, encoding="utf-8").read().strip()
     except OSError as e:
         raise SystemExit("Missing %s: %s" % (path, e))
@@ -39,13 +45,19 @@ def request(method, path, body=None):
     if not hmac.compare_digest(actual, expected):
         conn.close()
         raise SystemExit("TLS certificate fingerprint mismatch; refusing connection")
-    raw = json.dumps(body).encode() if body is not None else None
+    raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode() if body is not None else b""
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    message = "\n".join((timestamp, nonce, method, path, hashlib.sha256(raw).hexdigest()))
+    signature = hmac.new(token.encode(), message.encode(), hashlib.sha256).hexdigest()
     headers = {
-        "X-Speaking-Gym-Admin": token,
+        "X-Speaking-Gym-Timestamp": timestamp,
+        "X-Speaking-Gym-Nonce": nonce,
+        "X-Speaking-Gym-Signature": signature,
         "Accept": "application/json",
         "User-Agent": "speaking-gym-emergency-admin/1",
     }
-    if raw is not None:
+    if body is not None:
         headers["Content-Type"] = "application/json"
         headers["Content-Length"] = str(len(raw))
     conn.request(method, path, body=raw, headers=headers)
@@ -65,6 +77,22 @@ def main():
     parser = argparse.ArgumentParser(description="Speaking Gym VPN-fallback admin client")
     parser.add_argument("action", choices=("status", "health", "logs", "backup", "update", "restart"))
     args = parser.parse_args()
+    if args.action == "restart":
+        old_pid = request("GET", "/api/admin/status")["pid"]
+        data = request("POST", "/api/admin/action", {"action": "restart"})
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        for _ in range(30):
+            time.sleep(1)
+            try:
+                status = request("GET", "/api/admin/status")
+                if status["pid"] != old_pid:
+                    health = request("POST", "/api/admin/action", {"action": "health"})
+                    print("Restart verified: PID %s -> %s" % (old_pid, status["pid"]))
+                    print(json.dumps(health, ensure_ascii=False, indent=2))
+                    return
+            except (OSError, http.client.HTTPException):
+                pass
+        raise SystemExit("Restart was scheduled but the service did not recover within 30 seconds")
     if args.action in ("status", "logs"):
         data = request("GET", "/api/admin/" + args.action)
     else:
@@ -73,8 +101,6 @@ def main():
         print("\n".join(data.get("lines", [])))
     else:
         print(json.dumps(data, ensure_ascii=False, indent=2))
-    if args.action == "restart":
-        print("Restart scheduled. Wait a few seconds, then run: emergency_admin.py status")
 
 
 if __name__ == "__main__":

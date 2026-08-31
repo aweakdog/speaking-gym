@@ -6,7 +6,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 REMOTE="yliog@eez041.ece.ust.hk"
-URL="https://eez041.ece.ust.hk:1511"
 
 # 1. 从 data.js 导出话题库给服务端（Buddy 的话题菜单数据源）
 node -e "
@@ -33,5 +32,6 @@ if [[ "${1:-}" == "restart" ]]; then
   sleep 6
 fi
 
-# 5. 健康检查
-curl -sk -o /dev/null -w "服务状态: %{http_code}\n" "$URL/"
+# 5. 健康检查（客户端固定校验 TLS 证书指纹）
+python3 tools/emergency_admin.py status >/dev/null
+echo "服务状态: 200"

@@ -15,6 +15,8 @@ exec 9>"$LOCK"
 flock -n 9 || { echo "another update is already running"; exit 20; }
 
 export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
 if [[ ! -d "$SOURCE/.git" ]]; then
   git clone --quiet --filter=blob:none --no-checkout "$REPO" "$SOURCE"
 fi
@@ -74,7 +76,7 @@ fs.writeFileSync('topics.json', JSON.stringify({
 \`)"
 )
 
-rsync -a --exclude='*.pem' --exclude='*.db' --exclude='*.log' --exclude='run.sh' "$stage/" "$LIVE/"
+rsync -a --no-links --exclude='*.pem' --exclude='*.db' --exclude='*.log' --exclude='run.sh' --exclude='admin_update.sh' "$stage/" "$LIVE/"
 printf '%s\n' "$target" > "$MARKER"
 echo "deployed: $target"
 echo "restart required"

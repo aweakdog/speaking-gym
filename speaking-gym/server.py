@@ -52,6 +52,7 @@ ADMIN_DEPLOYED_PATH = os.path.join(DATA, "deployed-commit")
 ADMIN_FAILURE_LOCK = threading.Lock()
 ADMIN_ACTION_LOCK = threading.Lock()
 ADMIN_FAILURES = {}
+ADMIN_NONCES = {}
 
 
 def vision_available():
@@ -1086,6 +1087,9 @@ def admin_log_tail():
             text = f.read().decode("utf-8", "replace")
     except OSError:
         return []
+    for value in (DEEPSEEK_KEY, QWEN_KEY, ADMIN_TOKEN):
+        if value:
+            text = text.replace(value, "[REDACTED]")
     text = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "sk-[REDACTED]", text)
     return text.splitlines()[-100:]
 
@@ -1185,7 +1189,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def qpath(self):
         return urllib.parse.urlparse(self.path).path
 
-    def admin_auth(self, action):
+    def admin_auth(self, action, raw_body=b""):
         ip = self.client_address[0]
         if self.headers.get("Origin"):
             admin_audit(ip, action, "rejected", "browser origin not allowed")
@@ -1204,14 +1208,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 admin_audit(ip, action, "rate_limited")
                 self.fail("too many failed attempts", 429)
                 return False
-        supplied = self.headers.get("X-Speaking-Gym-Admin") or ""
-        if not hmac.compare_digest(supplied.encode(), ADMIN_TOKEN.encode()):
+        timestamp = self.headers.get("X-Speaking-Gym-Timestamp") or ""
+        nonce = self.headers.get("X-Speaking-Gym-Nonce") or ""
+        supplied = self.headers.get("X-Speaking-Gym-Signature") or ""
+        try:
+            fresh = abs(now - int(timestamp)) <= 60
+        except ValueError:
+            fresh = False
+        valid_shape = bool(re.fullmatch(r"[0-9a-f]{32}", nonce) and re.fullmatch(r"[0-9a-f]{64}", supplied))
+        message = "\n".join((timestamp, nonce, self.command, self.qpath(), hashlib.sha256(raw_body).hexdigest()))
+        expected = hmac.new(ADMIN_TOKEN.encode(), message.encode(), hashlib.sha256).hexdigest()
+        if not fresh or not valid_shape or not hmac.compare_digest(supplied, expected):
             with ADMIN_FAILURE_LOCK:
                 ADMIN_FAILURES.setdefault(ip, []).append(now)
-            admin_audit(ip, action, "unauthorized")
+            admin_audit(ip, action, "unauthorized", "invalid request signature")
             self.fail("unauthorized", 401)
             return False
         with ADMIN_FAILURE_LOCK:
+            for old_nonce, used_at in list(ADMIN_NONCES.items()):
+                if now - used_at > 120:
+                    ADMIN_NONCES.pop(old_nonce, None)
+            if nonce in ADMIN_NONCES:
+                admin_audit(ip, action, "rejected", "replayed nonce")
+                self.fail("unauthorized", 401)
+                return False
+            ADMIN_NONCES[nonce] = now
             ADMIN_FAILURES.pop(ip, None)
         return True
 
@@ -1230,9 +1251,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.fail("admin action failed", 500)
 
     def api_admin_action(self):
-        if not self.admin_auth("action"):
+        raw = self.body_raw(limit=4096)
+        if not self.admin_auth("action", raw):
             return
-        body = self.body_json()
+        try:
+            body = json.loads(raw.decode())
+        except Exception:
+            body = None
         if not isinstance(body, dict) or set(body) != {"action"}:
             return self.fail("exactly one action is required")
         action = body.get("action")
