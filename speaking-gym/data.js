@@ -1653,3 +1653,5 @@ const VOCAB_BANDS = [
 
 // 伪词（防虚报校正）：形似英语但不存在的词，勾选它们会触发猜测率扣正
 const VOCAB_PSEUDO = ["brandle", "plithe", "vintle", "quenty", "morvane", "sarpled", "crandish", "loftern", "destrile", "pontanous", "tremify", "glimber", "dorvish", "plenrick", "swathel", "cromble", "fentrile", "yandor", "briskane", "moltrend"];
+
+if (typeof module !== "undefined" && module.exports) module.exports = { TOPICS };

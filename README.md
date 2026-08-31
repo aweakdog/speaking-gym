@@ -30,7 +30,10 @@ SG_DATA_DIR=~/speaking-gym-data python3 speaking-gym/server.py 1511
 
 ## VPN 故障时的应急维护
 
-1511 提供一个独立令牌和证书指纹双重保护的受限管理接口，仅允许状态、健康检查、日志尾部、数据库备份、从固定 GitHub `main` 快进更新、重启六个动作；它不接受任意命令或参数。**仅在 Ivanti VPN 无法工作时作为应急后备，正常维护仍优先使用校园网/VPN SSH。**完整配置、安全边界与操作步骤见 [`speaking-gym/EMERGENCY_ADMIN.md`](speaking-gym/EMERGENCY_ADMIN.md)。
+1511 提供一个独立令牌和证书指纹双重保护的受限管理接口，仅允许状态、健康检查、日志尾部、数据库备份、从固定 GitHub `main` 快进更新、重启六个动作；它不接受任意命令或参数。**仅在 Ivanti VPN 无法工作时作为应急后备，正常维护仍优先使用校园网/VPN SSH。**
+
+- 本项目具体操作：[`speaking-gym/EMERGENCY_ADMIN.md`](speaking-gym/EMERGENCY_ADMIN.md)
+- 迁移到其他仓库的通用工程手册：[`VPN_FALLBACK_MAINTENANCE_PLAYBOOK.md`](VPN_FALLBACK_MAINTENANCE_PLAYBOOK.md)
 
 ## 注意
 

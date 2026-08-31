@@ -1106,8 +1106,16 @@ def admin_backup_db():
     finally:
         destination.close()
         source.close()
+    check = sqlite3.connect(target)
+    try:
+        integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        check.close()
+    if integrity != "ok":
+        os.remove(target)
+        raise RuntimeError("backup integrity check failed")
     os.chmod(target, 0o600)
-    return {"file": name, "bytes": os.path.getsize(target)}
+    return {"file": name, "bytes": os.path.getsize(target), "integrity": integrity}
 
 
 def admin_run_update():
@@ -1121,7 +1129,8 @@ def admin_run_update():
     output = (result.stdout or "").splitlines()[-30:]
     if result.returncode:
         raise RuntimeError("update failed (%d): %s" % (result.returncode, " | ".join(output[-5:])))
-    return {"updated": True, "output": output, "restart_required": True, "deployed_commit": deployed_commit()}
+    changed = not any(line.startswith("already current:") for line in output)
+    return {"updated": changed, "output": output, "restart_required": changed, "deployed_commit": deployed_commit()}
 
 
 # ---------- HTTP ----------

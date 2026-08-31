@@ -69,16 +69,23 @@ PY
 "$NODE" --check "$stage/data.js"
 "$NODE" --check "$stage/sw.js"
 python3 -c "import ast; ast.parse(open('$stage/server.py').read())"
-(
-  cd "$stage"
-  "$NODE" -e "
-const fs = require('fs');
-eval(fs.readFileSync('data.js','utf8') + \`
-fs.writeFileSync('topics.json', JSON.stringify({
-  categories: Object.values(TOPICS).map(t => ({ label: t.label, topics: t.items.map(i => i.q) }))
-}));
-\`)"
-)
+python3 - "$stage/topics.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+categories = data.get("categories") if isinstance(data, dict) else None
+if not isinstance(categories, list) or not categories:
+    raise SystemExit("invalid topics.json categories")
+total = 0
+for category in categories:
+    if not isinstance(category, dict) or not isinstance(category.get("label"), str):
+        raise SystemExit("invalid topics.json category")
+    topics = category.get("topics")
+    if not isinstance(topics, list) or not topics or not all(isinstance(q, str) and q for q in topics):
+        raise SystemExit("invalid topics.json topic list")
+    total += len(topics)
+print("topics.json validated: %d topics" % total)
+PY
 
 rsync -a --no-links --exclude='*.pem' --exclude='*.db' --exclude='*.log' --exclude='run.sh' --exclude='admin_update.sh' "$stage/" "$LIVE/"
 printf '%s\n' "$target" > "$MARKER"

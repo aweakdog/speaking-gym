@@ -13,7 +13,7 @@
 | `status` | `GET /api/admin/status` | 查看版本、进程、运行时长、磁盘和数据量 | 否 |
 | `health` | `POST /api/admin/action` | 检查数据库和 AI/Whisper/TTS/Push 组件 | 否 |
 | `logs` | `GET /api/admin/logs` | 查看 `server.log` 最后 100 行（自动遮盖 API Key） | 否 |
-| `backup` | `POST /api/admin/action` | 用 SQLite 在线备份 API 创建数据库快照 | 是 |
+| `backup` | `POST /api/admin/action` | 用 SQLite 在线备份 API 创建快照并执行完整性检查 | 是 |
 | `update` | `POST /api/admin/action` | 仅从固定私有仓库 `aweakdog/speaking-gym` 的 `main` 快进更新 | 是 |
 | `restart` | `POST /api/admin/action` | 延迟一秒后，仅重启 Speaking Gym | 是 |
 
@@ -21,7 +21,7 @@ API 不支持其他动作。`update` 与 `restart` 分开，是为了在重启�
 
 ## 日常应急更新流程
 
-先在本地完成测试、提交并推送：
+先在本地完成测试和提交。如果修改过 `data.js`，必须在提交前运行 `node speaking-gym/tools/export_topics.js`，并将生成后的 `topics.json` 放入同一提交。然后推送：
 
 ```bash
 cd "/Users/yuanhangli/Documents/Documents - yuanhang’s MacBook Pro/code/English"
@@ -52,7 +52,7 @@ python3 tools/emergency_admin.py status
 4. 拒绝非快进更新，防止公网接口回滚到任意旧提交；
 5. 用 `git archive` 导出 `speaking-gym/` 到临时目录；
 6. 拒绝仓库中出现 `.pem`、`.db` 或 `config.json`；
-7. 检查 JavaScript 和 Python 语法，并重新生成 `topics.json`；
+7. 检查 JavaScript 和 Python 语法，并用 Python 验证已提交的 `topics.json` 结构；它由可信的本地 `deploy.sh` 在提交前生成，应急更新不会提前执行刚下载的 `data.js`；
 8. 拒绝符号链接，并以 `rsync --no-links` 再做一次防护；
 9. 只同步应用代码，不接触证书、数据库、日志、`run.sh`、`admin_update.sh` 和数据目录；应急更新脚本自身只能通过正常 SSH 部署更新；
 10. 写入已部署提交编号，等待单独的 `restart` 动作。
@@ -97,4 +97,4 @@ python3 tools/emergency_admin.py status
 
 ## 令牌撤销
 
-应急接口不再需要或怀疑令牌泄漏时，通过校园网/VPN SSH 删除服务器配置中的 `admin_token` 并重启服务；接口随即返回 `503 admin interface disabled`。需要继续使用时，应生成新令牌并同步更新本地受限文件。
+应急接口不再需要或怀疑令牌泄漏时，通过校园网/VPN SSH 删除服务器配置中的 `admin_token`；如果启动环境设置过 `SG_ADMIN_TOKEN`，也必须一并取消。重启服务后接口应返回 `503 admin interface disabled`。需要继续使用时，应生成新令牌并同步更新本地受限文件。

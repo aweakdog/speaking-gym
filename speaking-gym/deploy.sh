@@ -8,14 +8,7 @@ cd "$(dirname "$0")"
 REMOTE="yliog@eez041.ece.ust.hk"
 
 # 1. 从 data.js 导出话题库给服务端（Buddy 的话题菜单数据源）
-node -e "
-const fs = require('fs');
-eval(fs.readFileSync('data.js','utf8') + \`
-fs.writeFileSync('topics.json', JSON.stringify({
-  categories: Object.values(TOPICS).map(t => ({ label: t.label, topics: t.items.map(i => i.q) }))
-}));
-console.log('topics.json 导出完成：' + Object.values(TOPICS).reduce((s,t)=>s+t.items.length,0) + ' 题');
-\`)"
+node tools/export_topics.js
 
 # 2. 语法检查
 node --check app.js && node --check data.js && node --check sw.js
