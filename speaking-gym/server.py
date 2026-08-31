@@ -4,13 +4,18 @@
 用法：SG_DATA_DIR=~/speaking-gym-data python3 server.py 1511
 """
 import functools
+import hashlib
+import hmac
 import http.server
+import importlib.util
 import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -40,13 +45,20 @@ QWEN_VISION_MODEL = CONFIG.get("qwen_vision_model") or "qwen3.8-flash"
 DEEPSEEK_VISION_MODEL = CONFIG.get("deepseek_vision_model") or "deepseek-v4-flash-vision-exp"
 # 视觉提供商：默认 deepseek（与文本共用一个账号）；配置 vision_provider="qwen" 可切回千问
 VISION_PROVIDER = (CONFIG.get("vision_provider") or ("deepseek" if DEEPSEEK_KEY else ("qwen" if QWEN_KEY else ""))).lower()
+ADMIN_TOKEN = CONFIG.get("admin_token") or os.environ.get("SG_ADMIN_TOKEN", "")
+STARTED_AT = time.time()
+ADMIN_AUDIT_PATH = os.path.join(DATA, "admin-audit.log")
+ADMIN_DEPLOYED_PATH = os.path.join(DATA, "deployed-commit")
+ADMIN_FAILURE_LOCK = threading.Lock()
+ADMIN_ACTION_LOCK = threading.Lock()
+ADMIN_FAILURES = {}
 
 
 def vision_available():
     return (VISION_PROVIDER == "deepseek" and bool(DEEPSEEK_KEY)) or (VISION_PROVIDER == "qwen" and bool(QWEN_KEY))
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
-FORBIDDEN_STATIC = re.compile(r"(^|/)(data(/|$)|[^/]*\.(pem|db|log)$|run\.sh$|start\.sh$)")
+FORBIDDEN_STATIC = re.compile(r"(^|/)(data(/|$)|[^/]*\.(pem|db|log|sh)$)")
 
 
 # ---------- 数据库 ----------
@@ -98,6 +110,17 @@ def init_db():
         ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
         if "chat_fix_level" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN chat_fix_level TEXT DEFAULT 'standard'")
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ts INTEGER, role TEXT, content TEXT, fix_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS chat_memory (
+            user_id INTEGER PRIMARY KEY,
+            summary TEXT, last_msg_id INTEGER DEFAULT 0, updated INTEGER
+        );
+        """)
         ccols = [r[1] for r in c.execute("PRAGMA table_info(chat_messages)")]
         if "channel" not in ccols:
             c.execute("ALTER TABLE chat_messages ADD COLUMN channel TEXT")
@@ -131,17 +154,6 @@ def init_db():
             ts INTEGER, date TEXT,
             estimate INTEGER, low INTEGER, high INTEGER,
             overclaim REAL, details TEXT
-        );
-        """)
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            ts INTEGER, role TEXT, content TEXT, fix_json TEXT
-        );
-        CREATE TABLE IF NOT EXISTS chat_memory (
-            user_id INTEGER PRIMARY KEY,
-            summary TEXT, last_msg_id INTEGER DEFAULT 0, updated INTEGER
         );
         """)
 
@@ -989,6 +1001,125 @@ def maybe_summarize(uid):
         sys.stderr.write("summarize failed: %s\n" % e)
 
 
+def admin_audit(ip, action, result, detail=""):
+    row = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "ip": ip,
+        "action": action,
+        "result": result,
+        "detail": str(detail)[:300],
+    }
+    try:
+        with open(ADMIN_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.chmod(ADMIN_AUDIT_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def deployed_commit():
+    try:
+        value = open(ADMIN_DEPLOYED_PATH, encoding="ascii").read().strip()
+        return value if re.fullmatch(r"[0-9a-f]{40}", value) else None
+    except OSError:
+        return None
+
+
+def build_version():
+    try:
+        text = open(os.path.join(BASE, "index.html"), encoding="utf-8").read(10000)
+        match = re.search(r'class="ver">([^<]+)', text)
+        return match.group(1) if match else "unknown"
+    except OSError:
+        return "unknown"
+
+
+def admin_status_data():
+    with db() as c:
+        counts = {
+            "users": c.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+            "practice_rounds": c.execute("SELECT COUNT(*) FROM scores").fetchone()[0],
+            "recordings": c.execute("SELECT COUNT(*) FROM recordings").fetchone()[0],
+            "active_reminders": c.execute("SELECT COUNT(*) FROM reminders WHERE active=1").fetchone()[0],
+        }
+    disk = shutil.disk_usage(DATA)
+    return {
+        "ok": True,
+        "service": "speaking-gym",
+        "version": build_version(),
+        "deployed_commit": deployed_commit(),
+        "pid": os.getpid(),
+        "uptime_seconds": int(time.time() - STARTED_AT),
+        "database_bytes": os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0,
+        "disk_free_bytes": disk.free,
+        "counts": counts,
+    }
+
+
+def admin_health_data():
+    checks = {}
+    try:
+        with db() as c:
+            checks["database"] = c.execute("PRAGMA quick_check").fetchone()[0]
+    except Exception:
+        checks["database"] = "error"
+    checks.update({
+        "deepseek_configured": bool(DEEPSEEK_KEY),
+        "vision_available": vision_available(),
+        "whisper_available": whisper_available(),
+        "edge_tts_available": importlib.util.find_spec("edge_tts") is not None,
+        "push_available": push_available(),
+        "update_script": os.path.isfile(os.path.join(BASE, "admin_update.sh")),
+        "restart_script": os.path.isfile(os.path.join(BASE, "run.sh")),
+        "admin_token_configured": len(ADMIN_TOKEN) >= 32,
+    })
+    return {"ok": checks["database"] == "ok", "checks": checks}
+
+
+def admin_log_tail():
+    path = os.path.join(BASE, "server.log")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            f.seek(max(0, end - 65536))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    text = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "sk-[REDACTED]", text)
+    return text.splitlines()[-100:]
+
+
+def admin_backup_db():
+    folder = os.path.join(DATA, "backups")
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    name = "gym-%s.db" % datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    target = os.path.join(folder, name)
+    source = sqlite3.connect(DB_PATH, timeout=15)
+    destination = sqlite3.connect(target)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+    os.chmod(target, 0o600)
+    return {"file": name, "bytes": os.path.getsize(target)}
+
+
+def admin_run_update():
+    script = os.path.join(BASE, "admin_update.sh")
+    if not os.path.isfile(script):
+        raise RuntimeError("update script is not installed")
+    result = subprocess.run(
+        ["/bin/bash", script], cwd=BASE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=180, check=False,
+    )
+    output = (result.stdout or "").splitlines()[-30:]
+    if result.returncode:
+        raise RuntimeError("update failed (%d): %s" % (result.returncode, " | ".join(output[-5:])))
+    return {"updated": True, "output": output, "restart_required": True, "deployed_commit": deployed_commit()}
+
+
 # ---------- HTTP ----------
 class Handler(http.server.SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -998,7 +1129,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # 代码类静态资源禁止启发式缓存：每次都向服务器校验，保证部署即生效
         try:
             p = urllib.parse.urlparse(self.path).path
-            if not p.startswith("/api/") and (p == "/" or re.search(r"\.(html|js|css|webmanifest)$", p)):
+            if p.startswith("/api/admin/"):
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+            elif not p.startswith("/api/") and (p == "/" or re.search(r"\.(html|js|css|webmanifest)$", p)):
                 self.send_header("Cache-Control", "no-cache")
         except Exception:
             pass
@@ -1051,9 +1185,99 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def qpath(self):
         return urllib.parse.urlparse(self.path).path
 
+    def admin_auth(self, action):
+        ip = self.client_address[0]
+        if self.headers.get("Origin"):
+            admin_audit(ip, action, "rejected", "browser origin not allowed")
+            self.fail("unauthorized", 401)
+            return False
+        if len(ADMIN_TOKEN) < 32:
+            self.fail("admin interface disabled", 503)
+            return False
+        now = time.time()
+        with ADMIN_FAILURE_LOCK:
+            if len(ADMIN_FAILURES) > 1000:
+                ADMIN_FAILURES.clear()
+            recent = [ts for ts in ADMIN_FAILURES.get(ip, []) if now - ts < 600]
+            ADMIN_FAILURES[ip] = recent
+            if len(recent) >= 5:
+                admin_audit(ip, action, "rate_limited")
+                self.fail("too many failed attempts", 429)
+                return False
+        supplied = self.headers.get("X-Speaking-Gym-Admin") or ""
+        if not hmac.compare_digest(supplied.encode(), ADMIN_TOKEN.encode()):
+            with ADMIN_FAILURE_LOCK:
+                ADMIN_FAILURES.setdefault(ip, []).append(now)
+            admin_audit(ip, action, "unauthorized")
+            self.fail("unauthorized", 401)
+            return False
+        with ADMIN_FAILURE_LOCK:
+            ADMIN_FAILURES.pop(ip, None)
+        return True
+
+    def api_admin_get(self, p):
+        action = "status" if p == "/api/admin/status" else "logs" if p == "/api/admin/logs" else "unknown"
+        if action == "unknown":
+            return self.fail("not found", 404)
+        if not self.admin_auth(action):
+            return
+        try:
+            data = admin_status_data() if action == "status" else {"ok": True, "lines": admin_log_tail()}
+            admin_audit(self.client_address[0], action, "ok")
+            return self.send_json(data)
+        except Exception:
+            admin_audit(self.client_address[0], action, "error")
+            return self.fail("admin action failed", 500)
+
+    def api_admin_action(self):
+        if not self.admin_auth("action"):
+            return
+        body = self.body_json()
+        if not isinstance(body, dict) or set(body) != {"action"}:
+            return self.fail("exactly one action is required")
+        action = body.get("action")
+        if action not in {"health", "update", "restart", "backup"}:
+            admin_audit(self.client_address[0], str(action), "rejected", "not allowlisted")
+            return self.fail("action not allowed", 403)
+        if action == "health":
+            result = admin_health_data()
+            admin_audit(self.client_address[0], action, "ok" if result["ok"] else "degraded")
+            return self.send_json(result, 200 if result["ok"] else 503)
+        if not ADMIN_ACTION_LOCK.acquire(blocking=False):
+            return self.fail("another admin action is running", 409)
+        try:
+            if action == "backup":
+                result = {"ok": True, "backup": admin_backup_db()}
+            elif action == "update":
+                result = {"ok": True, **admin_run_update()}
+            else:
+                script = os.path.join(BASE, "run.sh")
+                if not os.path.isfile(script):
+                    raise RuntimeError("restart script is not installed")
+                def restart_later():
+                    time.sleep(1.0)
+                    with open(os.devnull, "wb") as devnull:
+                        subprocess.Popen(["/bin/bash", script], cwd=BASE, stdin=devnull,
+                                         stdout=devnull, stderr=devnull, start_new_session=True)
+                threading.Thread(target=restart_later, daemon=True).start()
+                result = {"ok": True, "restart_scheduled": True}
+            admin_audit(self.client_address[0], action, "ok", result.get("deployed_commit", ""))
+            return self.send_json(result)
+        except subprocess.TimeoutExpired:
+            admin_audit(self.client_address[0], action, "error", "timeout")
+            return self.fail("admin action timed out", 504)
+        except Exception as e:
+            admin_audit(self.client_address[0], action, "error", type(e).__name__)
+            sys.stderr.write("admin %s failed: %s\n" % (action, e))
+            return self.fail("admin action failed", 500)
+        finally:
+            ADMIN_ACTION_LOCK.release()
+
     # --- 路由 ---
     def do_GET(self):
         p = self.qpath()
+        if p.startswith("/api/admin/"):
+            return self.api_admin_get(p)
         if p.startswith("/api/"):
             return self.api_get(p)
         if p == "/cert":  # 下载自签名证书（公钥，供 iPhone/Mac 安装信任）
@@ -1076,6 +1300,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         p = self.qpath()
         try:
+            if p == "/api/admin/action":
+                return self.api_admin_action()
             if p == "/api/register":
                 return self.api_register()
             if p == "/api/login":

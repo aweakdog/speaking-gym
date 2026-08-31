@@ -24,6 +24,8 @@ python3 -c "import ast; ast.parse(open('server.py').read())"
 
 # 3. 同步（排除本地私密与数据文件）
 rsync -a --exclude='.DS_Store' --exclude='*.pem' --exclude='data/' --exclude='server.log' ./ "$REMOTE":~/speaking-gym/
+COMMIT="$(git -C .. rev-parse HEAD)"
+ssh "$REMOTE" "printf '%s\\n' '$COMMIT' > ~/speaking-gym-data/deployed-commit"
 
 # 4. 需要时重启
 if [[ "${1:-}" == "restart" ]]; then
