@@ -59,7 +59,7 @@ def vision_available():
     return (VISION_PROVIDER == "deepseek" and bool(DEEPSEEK_KEY)) or (VISION_PROVIDER == "qwen" and bool(QWEN_KEY))
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
-FORBIDDEN_STATIC = re.compile(r"(^|/)(data(/|$)|[^/]*\.(pem|db|log|sh)$)")
+STATIC_ALLOWED = re.compile(r"^/(?:$|[^?]*\.(?:html|css|js|webmanifest|png|jpg|jpeg|svg|webp|ico))$")
 
 
 # ---------- 数据库 ----------
@@ -1318,7 +1318,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
-        if FORBIDDEN_STATIC.search(p):
+        if not STATIC_ALLOWED.fullmatch(p):
             return self.fail("not found", 404)
         return super().do_GET()
 
