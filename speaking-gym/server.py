@@ -1618,7 +1618,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             text = m2.group(0) if m2 else cut
         if not text:
             return self.fail("missing text")
-        voice = TTS_VOICES.get((q.get("voice") or ["aria"])[0], TTS_VOICES["aria"])
+        voice = TTS_VOICES.get((q.get("voice") or ["jenny"])[0], TTS_VOICES["jenny"])
         rate = TTS_RATES.get((q.get("rate") or ["0.9"])[0], "-10%")
         import hashlib
         key = hashlib.sha1(("%s|%s|%s" % (voice, rate, text)).encode()).hexdigest()

@@ -115,12 +115,21 @@ function pickVoice() {
     || voices.find((v) => v.lang === "en-US") || voices[0];
 }
 let ttsAudio = null;
+/* 音色 / 语速选择记住上次的值（默认 Jenny 女声，0.9x） */
+for (const [id, key] of [["voice", "sg_voice"], ["rate", "sg_rate"]]) {
+  const sel = $("#" + id);
+  if (!sel) continue;
+  const saved = localStorage.getItem(key);
+  if (saved && [...sel.options].some((o) => o.value === saved)) sel.value = saved;
+  sel.addEventListener("change", () => localStorage.setItem(key, sel.value));
+}
+
 /* 返回 Promise：朗读播放完毕（或失败）时 resolve —— 免提模式靠它衔接下一轮 */
 async function speak(text) {
   speechSynthesis.cancel();
   if (ttsAudio) { try { ttsAudio.pause(); } catch (_) {} ttsAudio = null; }
   const rate = $("#rate").value || "0.9";
-  const voice = ($("#voice") && $("#voice").value) || "aria";
+  const voice = ($("#voice") && $("#voice").value) || "jenny";
   if (AUTH.token) {
     try {
       const res = await fetch(`/api/tts?text=${encodeURIComponent(text)}&rate=${rate}&voice=${voice}`, {
