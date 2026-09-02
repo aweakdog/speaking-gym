@@ -310,6 +310,16 @@ const getNotes = () => load("sg_notes", []);
 let timerId = null;
 function clearTimer() { if (timerId) { clearInterval(timerId); timerId = null; } }
 
+/* 原地变身按钮：锁定当前宽度后换文案/样式/动作，鼠标不用移动就能点下一步 */
+function morphButton(btn, label, cls, onClick, disabled = false) {
+  if (!btn) return;
+  if (!btn.style.minWidth) btn.style.minWidth = btn.offsetWidth + "px";
+  btn.textContent = label;
+  btn.className = "btn " + (cls || "");
+  btn.onclick = onClick || null;
+  btn.disabled = disabled;
+}
+
 document.querySelectorAll("#tabs button").forEach((b) => {
   b.addEventListener("click", () => {
     document.querySelectorAll("#tabs button").forEach((x) => x.classList.remove("active"));
@@ -369,9 +379,12 @@ function renderShadow() {
       <div id="shadowOut"></div>
     </div>`;
   $("#btnPlay").onclick = () => speak(item.en);
-  $("#btnRec").onclick = async () => {
+  const recHandler = async () => {
     const out = () => $("#shadowOut");
+    const rec = () => $("#btnRec");
+    const resetRecBtn = () => morphButton(rec(), "我来跟读", "", recHandler);
     const showResult = (text, sc, src, pitchVar) => {
+      resetRecBtn();
       if (!out()) return;
       const cls = sc >= 85 ? "good" : sc >= 60 ? "mid" : "low";
       const tip = sc >= 85 ? "很好，可以进入下一句" : "再听一遍读音，重点模仿语调后重试";
@@ -398,13 +411,19 @@ function renderShadow() {
       $("#btnAgain").onclick = () => renderShadow();
       $("#btnNext").onclick = () => { session.scores.push(sc); advanceShadow(); };
     };
+    morphButton(rec(), "准备麦克风……", "", null, true);
     out().innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在准备麦克风……</div>`;
     const recOk = await startRecording();
     if (!recOk) {
-      if (!SR) { out().innerHTML = `<div class="result-box">无法使用麦克风，请在浏览器地址栏允许麦克风权限后重试。</div>`; return; }
+      if (!SR) {
+        resetRecBtn();
+        out().innerHTML = `<div class="result-box">无法使用麦克风，请在浏览器地址栏允许麦克风权限后重试。</div>`;
+        return;
+      }
+      morphButton(rec(), "正在听……", "", null, true);
       out().innerHTML = `<div class="rec-live"><div class="rec-dot"></div>正在听你说……（浏览器识别）</div>`;
       recognizeOnce((text) => {
-        if (!text) { if (out()) out().innerHTML = `<div class="result-box">没有听清，请再试一次。</div>`; return; }
+        if (!text) { resetRecBtn(); if (out()) out().innerHTML = `<div class="result-box">没有听清，请再试一次。</div>`; return; }
         showResult(text, shadowScore(item.en, text), "browser");
       });
       return;
@@ -414,6 +433,7 @@ function renderShadow() {
       if (done) return;
       done = true;
       stopVad();
+      morphButton(rec(), "识别中……", "", null, true);
       const blob = await stopRecording();
       if (!out()) return;
       out().innerHTML = `<div class="result-box"><div class="muted-sm">Whisper 精确识别中……（约 2-5 秒）</div></div>`;
@@ -423,14 +443,16 @@ function renderShadow() {
           if (resp.score != null) return showResult(resp.transcript, resp.score, "whisper", resp.pitch_var);
         } catch (_) {}
       }
+      resetRecBtn();
       if (out()) out().innerHTML = `<div class="result-box">没有录到声音或识别失败，请再试一次（离麦克风近一点）。</div>`;
     };
+    /* 同一个按钮原地变成「我说完了」：手不用挪，说完直接点；停顿 2 秒也会自动结束 */
+    morphButton(rec(), "■ 我说完了", "stop", finish);
     out().innerHTML = `
-      <div class="rec-live"><div class="rec-dot"></div>正在录音……读完整句后<b>停顿 2 秒</b>自动结束（逗号处换气不会截断）</div>
-      <div style="margin-top:8px"><button class="btn secondary" id="btnStopShadow">说完了</button></div>`;
-    $("#btnStopShadow").onclick = finish;
+      <div class="rec-live"><div class="rec-dot"></div>正在录音……读完整句后点「我说完了」，或<b>停顿 2 秒</b>自动结束（逗号处换气不会截断）</div>`;
     startVad(recorder.stream, finish);
   };
+  $("#btnRec").onclick = recHandler;
   $("#btnSkip").onclick = () => advanceShadow();
 }
 function advanceShadow() {
@@ -459,7 +481,6 @@ function renderTopic() {
       <div class="timer" id="timer">${fmt(ROUNDS[r].sec)}</div>
       <div>
         <button class="btn" id="btnStart">开始${ROUNDS[r].label.split(" · ")[0]}（开始说话）</button>
-        <button class="btn secondary hidden" id="btnStop">提前结束本轮</button>
         <button class="btn ghost" id="btnChange">换个话题</button>
       </div>
       <div id="live"></div>
@@ -469,7 +490,9 @@ function renderTopic() {
   let startAt = null;
   let finished = false;
   $("#btnChange").onclick = () => { session.topic = null; session.round = 0; session.rounds = []; renderTopic(); };
-  $("#btnStart").onclick = async () => {
+  const startLabel = `开始${ROUNDS[r].label.split(" · ")[0]}（开始说话）`;
+  const startHandler = async () => {
+    morphButton($("#btnStart"), "准备麦克风……", "", null, true);
     const recOk = await startRecording();
     let srOk = false;
     if (SR) srOk = startDictation((fin, inter) => {
@@ -478,6 +501,7 @@ function renderTopic() {
         <div class="result-box"><span class="label">实时转写</span>${esc(fin)}<i style="color:#999">${esc(inter)}</i></div>`;
     });
     if (!srOk && !recOk) {
+      morphButton($("#btnStart"), startLabel, "", startHandler);
       alert("录音和语音识别都不可用。请在浏览器地址栏允许麦克风权限后重试。");
       return;
     }
@@ -487,8 +511,8 @@ function renderTopic() {
         <div class="rec-live"><div class="rec-dot"></div>正在录音……（本机无实时转写，结束后由服务器 Whisper 精确转写并评分）</div>`;
     }
     startAt = Date.now();
-    $("#btnStart").classList.add("hidden");
-    $("#btnStop").classList.remove("hidden");
+    /* 「开始」按钮原地变成「我说完了」，鼠标不用挪；时间到也会自动结束 */
+    morphButton($("#btnStart"), "■ 我说完了", "stop", finishRound);
     $("#btnChange").classList.add("hidden");
     let left = roundSec;
     timerId = setInterval(() => {
@@ -499,12 +523,13 @@ function renderTopic() {
       if (left <= 10) tEl.classList.add("warning");
       if (left <= 0) finishRound();
     }, 1000);
-    $("#btnStop").onclick = finishRound;
   };
+  $("#btnStart").onclick = startHandler;
   async function finishRound() {
     if (finished) return;
     finished = true;
     clearTimer();
+    morphButton($("#btnStart"), "整理中……", "", null, true);
     const text = stopDictation();
     const blob = await stopRecording();
     const elapsed = Math.max(5, Math.round((Date.now() - startAt) / 1000));
