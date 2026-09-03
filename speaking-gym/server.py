@@ -159,6 +159,16 @@ def init_db():
             estimate INTEGER, low INTEGER, high INTEGER,
             overclaim REAL, details TEXT
         );
+        CREATE TABLE IF NOT EXISTS vocab_words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            word TEXT NOT NULL, word_key TEXT NOT NULL,
+            meaning_en TEXT, meaning_zh TEXT, example TEXT, context TEXT,
+            source TEXT, created INTEGER, date TEXT,
+            reviews INTEGER DEFAULT 0, correct INTEGER DEFAULT 0, streak INTEGER DEFAULT 0,
+            due INTEGER DEFAULT 0, last_reviewed INTEGER,
+            UNIQUE(user_id, word_key)
+        );
         """)
 
 
@@ -480,9 +490,27 @@ CHAT_SYSTEM_TMPL = (
     "you did. During the chat, stay on the chosen topic with follow-ups unless they steer away. Use the PRACTICE "
     "SNAPSHOT like a caring coach — mention streaks, recent scores, practiced topics or vocabulary size naturally "
     "when relevant (praise progress, nudge gaps), but never dump raw data.\n"
+    "12. Word book: whenever the learner asks what an English word or phrase means, how to use or pronounce it, "
+    "how to say something in English (\"X 是什么意思\", \"what does X mean\", \"how do you say ... in English\"), or "
+    "asks about an expression YOU just used, fill new_word: word (dictionary/lemma form, or the phrase), "
+    "meaning_en (one short plain-English definition), meaning_zh (concise Chinese), example (one natural sentence "
+    "using it — ideally about the learner's own life). Explain it in your reply as usual and end with a short "
+    "note like \"— added to your word book\". Only one word per turn (the main one asked about); never add words "
+    "the learner already used correctly themselves; otherwise null. The system message may include a WORD BOOK "
+    "block (their saved words, most recent first, plus how many are due for review): casually reuse one of those "
+    "words when it fits the conversation so it sticks, and if several are due and the chat is idle, you may "
+    "suggest a quick review in the 长期记忆 → 单词本 tab.\n"
     'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or '
     'null, "memory_add": "..." or null, "reminder": {{"text": "...", "type": "...", "weekday": 0, "time": "HH:MM", '
-    '"datetime": "..."}} or null}}'
+    '"datetime": "..."}} or null, "new_word": {{"word": "...", "meaning_en": "...", "meaning_zh": "...", '
+    '"example": "..."}} or null}}'
+)
+
+DEFINE_WORD_SYSTEM = (
+    "You are a concise English-Chinese learner's dictionary for a Chinese intermediate learner. Given a word or "
+    "phrase, return JSON ONLY: {\"word\": dictionary/lemma form, \"meaning_en\": one plain-English definition "
+    "(<= 20 words), \"meaning_zh\": concise Chinese meaning, \"example\": one natural everyday example sentence "
+    "(<= 20 words)}. If the input is not English or is nonsense, return {\"error\": \"not a word\"}."
 )
 
 
@@ -537,6 +565,105 @@ def practice_snapshot_block(uid):
     if vocab:
         parts.append("vocabulary size test: ~%s word families (%s)" % (vocab["estimate"], vocab["date"]))
     return "PRACTICE SNAPSHOT: " + " | ".join(parts)
+
+
+# ---------- 单词本（对话自动收录 + 手动添加 + 间隔复习） ----------
+WORD_RE_OK = re.compile(r"[A-Za-z]")
+SRS_INTERVALS_DAYS = [1, 2, 4, 7, 15, 30, 60]  # 连续答对 n 次后的下次复习间隔
+
+
+def clean_word(word):
+    w = re.sub(r"\s+", " ", str(word or "")).strip(" .,;:!?\"'“”‘’()[]")
+    return w if WORD_RE_OK.search(w) and len(w) <= 60 else ""
+
+
+def word_key(word):
+    return re.sub(r"[^a-z0-9' -]", "", word.lower()).strip()
+
+
+def upsert_word(uid, word, meaning_en="", meaning_zh="", example="", context="", source="chat"):
+    word = clean_word(word)
+    if not word:
+        return None
+    key = word_key(word)
+    if not key:
+        return None
+    now = int(time.time())
+    with db() as c:
+        row = c.execute("SELECT id FROM vocab_words WHERE user_id=? AND word_key=?", (uid, key)).fetchone()
+        if row:
+            c.execute(
+                "UPDATE vocab_words SET meaning_en=COALESCE(NULLIF(?, ''), meaning_en), "
+                "meaning_zh=COALESCE(NULLIF(?, ''), meaning_zh), example=COALESCE(NULLIF(?, ''), example) WHERE id=?",
+                (str(meaning_en or "")[:300], str(meaning_zh or "")[:300], str(example or "")[:300], row["id"]),
+            )
+            return {"id": row["id"], "word": word, "new": False}
+        cur = c.execute(
+            "INSERT INTO vocab_words (user_id, word, word_key, meaning_en, meaning_zh, example, context, source, "
+            "created, date, due) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, word, key, str(meaning_en or "")[:300], str(meaning_zh or "")[:300], str(example or "")[:300],
+             str(context or "")[:300], source, now, date.today().isoformat(), now),
+        )
+        return {"id": cur.lastrowid, "word": word, "new": True}
+
+
+def define_word(word):
+    data = parse_chat_json(deepseek_call(
+        [{"role": "system", "content": DEFINE_WORD_SYSTEM}, {"role": "user", "content": word}],
+        temperature=0.1, max_tokens=250,
+    ))
+    if not isinstance(data, dict) or data.get("error") or not clean_word(data.get("word") or word):
+        return None
+    return {
+        "word": clean_word(data.get("word") or word),
+        "meaning_en": str(data.get("meaning_en") or "")[:300],
+        "meaning_zh": str(data.get("meaning_zh") or "")[:300],
+        "example": str(data.get("example") or "")[:300],
+    }
+
+
+def apply_review(uid, wid, result):
+    now = int(time.time())
+    with db() as c:
+        row = c.execute("SELECT * FROM vocab_words WHERE id=? AND user_id=?", (wid, uid)).fetchone()
+        if not row:
+            return None
+        streak = row["streak"] or 0
+        if result == "know":
+            streak += 1
+            due = now + SRS_INTERVALS_DAYS[min(streak - 1, len(SRS_INTERVALS_DAYS) - 1)] * 86400
+        elif result == "unsure":
+            due = now + 86400
+        else:
+            streak = 0
+            due = now + 6 * 3600
+        c.execute(
+            "UPDATE vocab_words SET reviews=reviews+1, correct=correct+?, streak=?, due=?, last_reviewed=? WHERE id=?",
+            (1 if result == "know" else 0, streak, due, now, wid),
+        )
+        return {"id": wid, "streak": streak, "due": due}
+
+
+def pick_quiz_words(uid, n):
+    now = int(time.time())
+    with db() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM vocab_words WHERE user_id=? ORDER BY CASE WHEN due<=? THEN 0 ELSE 1 END, "
+            "CASE WHEN reviews=0 THEN 0 ELSE 1 END, due ASC, created DESC LIMIT ?", (uid, now, n)).fetchall()]
+    return rows
+
+
+def word_book_block(uid):
+    now = int(time.time())
+    with db() as c:
+        total = c.execute("SELECT COUNT(*) FROM vocab_words WHERE user_id=?", (uid,)).fetchone()[0]
+        if not total:
+            return ""
+        due = c.execute("SELECT COUNT(*) FROM vocab_words WHERE user_id=? AND due<=?", (uid, now)).fetchone()[0]
+        recent = c.execute(
+            "SELECT word, meaning_zh FROM vocab_words WHERE user_id=? ORDER BY created DESC LIMIT 12", (uid,)).fetchall()
+    items = "; ".join("%s (%s)" % (r["word"], (r["meaning_zh"] or "")[:20]) for r in recent)
+    return "WORD BOOK: %d saved words, %d due for review. Most recent: %s" % (total, due, items)
 
 
 def tag_user_content(content, channel, typed_note, photo_desc=None):
@@ -845,13 +972,17 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
     snap = practice_snapshot_block(uid)
     if snap:
         extra += "\n\n" + snap
+    wb = word_book_block(uid)
+    if wb:
+        extra += "\n\n" + wb
     msgs = [{"role": "system", "content": system + "\n\n" + time_line + extra
              + "\n\nMEMORY ABOUT THE LEARNER:\n" + summary}]
     for m in recent:
         if m["role"] == "assistant":
             # 历史 assistant 消息统一还原成完整 JSON 形态，让模型持续模仿全字段输出格式
             msgs.append({"role": "assistant", "content": json.dumps(
-                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None}, ensure_ascii=False)})
+                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None, "new_word": None},
+                ensure_ascii=False)})
         else:
             ttag = "[time %s] " % datetime.fromtimestamp((m["ts"] or 0) / 1000).strftime("%m-%d %H:%M")
             msgs.append({"role": "user", "content": ttag + tag_user_content(
@@ -907,6 +1038,19 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         except Exception as e:
             sys.stderr.write("reminder parse failed: %s (%r)\n" % (e, rem))
 
+    # 单词本：学习者问到不认识的词，自动收录
+    word_added = None
+    nw = data.get("new_word") if isinstance(data.get("new_word"), dict) else None
+    if nw and clean_word(nw.get("word")):
+        try:
+            saved = upsert_word(uid, nw.get("word"), nw.get("meaning_en"), nw.get("meaning_zh"), nw.get("example"),
+                                context=text[:300], source="chat")
+            if saved:
+                word_added = {"id": saved["id"], "word": saved["word"], "meaning_zh": str(nw.get("meaning_zh") or "")[:300],
+                              "new": saved["new"]}
+        except Exception as e:
+            sys.stderr.write("word save failed: %s\n" % e)
+
     if level == "strict" and not fix:
         # 严格模式下主回复没给纠错时，用低温度的专职语法检查兜底
         try:
@@ -934,7 +1078,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         threading.Thread(target=tag_photo, args=(int(photo_id), text, photo_desc, reply), daemon=True).start()
     threading.Thread(target=maybe_summarize, args=(uid,), daemon=True).start()
     return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None,
-            "memory_added": memory_added, "reminder_set": reminder_set}
+            "memory_added": memory_added, "reminder_set": reminder_set, "word_added": word_added}
 
 
 def check_password(user, pw):
@@ -1361,6 +1505,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_photo_upload()
             if p == "/api/photos/organize":
                 return self.api_photo_organize()
+            if p == "/api/words":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                d = self.body_json()
+                word = clean_word(d.get("word"))
+                if not word:
+                    return self.fail("请输入一个英文单词或短语")
+                meaning_zh = str(d.get("meaning_zh") or "").strip()[:300]
+                meaning_en, example = "", ""
+                if (not meaning_zh or d.get("define")) and DEEPSEEK_KEY:
+                    try:
+                        info = define_word(word)
+                    except Exception as e:
+                        sys.stderr.write("define failed: %s\n" % e)
+                        info = None
+                    if info:
+                        word, meaning_en, example = info["word"], info["meaning_en"], info["example"]
+                        meaning_zh = meaning_zh or info["meaning_zh"]
+                saved = upsert_word(user["id"], word, meaning_en, meaning_zh, example, source="manual")
+                if not saved:
+                    return self.fail("无法保存这个词")
+                return self.send_json({"ok": True, **saved, "meaning_zh": meaning_zh, "meaning_en": meaning_en,
+                                       "example": example})
+            m = re.match(r"^/api/words/(\d+)/review$", p)
+            if m:
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                result = self.body_json().get("result")
+                if result not in ("know", "unsure", "forgot"):
+                    return self.fail("bad result")
+                out = apply_review(user["id"], int(m.group(1)), result)
+                return self.send_json(out) if out else self.fail("not found", 404)
             if p == "/api/vocab":
                 user = self.auth()
                 if not user:
@@ -1452,6 +1630,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.fail("unauthorized", 401)
             with db() as c:
                 c.execute("UPDATE reminders SET active=0 WHERE id=? AND user_id=?", (int(mr.group(1)), user["id"]))
+            return self.send_json({"ok": True})
+        mw = re.match(r"^/api/words/(\d+)$", self.qpath())
+        if mw:
+            user = self.auth()
+            if not user:
+                return self.fail("unauthorized", 401)
+            with db() as c:
+                c.execute("DELETE FROM vocab_words WHERE id=? AND user_id=?", (int(mw.group(1)), user["id"]))
             return self.send_json({"ok": True})
         mp = re.match(r"^/api/photos/(\d+)$", self.qpath())
         if mp:
@@ -1546,6 +1732,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "summary": (mem["summary"] if mem else "") or "",
                     "updated": mem["updated"] if mem else None,
                 })
+            if p == "/api/words":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                now = int(time.time())
+                with db() as c:
+                    rows = [dict(r) for r in c.execute(
+                        "SELECT id, word, meaning_en, meaning_zh, example, context, source, created, date, reviews, "
+                        "correct, streak, due, last_reviewed FROM vocab_words WHERE user_id=? ORDER BY created DESC",
+                        (user["id"],)).fetchall()]
+                return self.send_json({"items": rows, "due": sum(1 for r in rows if (r["due"] or 0) <= now), "now": now})
+            if p == "/api/words/quiz":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    n = max(1, min(30, int((q.get("n") or ["10"])[0])))
+                except ValueError:
+                    n = 10
+                return self.send_json({"items": pick_quiz_words(user["id"], n)})
             if p == "/api/vocab/history":
                 user = self.auth()
                 if not user:

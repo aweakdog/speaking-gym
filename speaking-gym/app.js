@@ -820,6 +820,9 @@ async function renderChat() {
       else if (ph) ph.remove();
       append(chatBubble("ai", resp.reply, resp.fix));
       if (resp.memory_added) append(`<div class="msg ai"><div class="chat-note">已记入长期记忆：${esc(resp.memory_added)}</div></div>`);
+      if (resp.word_added) append(`<div class="msg ai"><div class="chat-note">📒 ${resp.word_added.new ? "已加入单词本" : "单词本已有此词，释义已更新"}：<b>${esc(resp.word_added.word)}</b>${resp.word_added.meaning_zh ? " · " + esc(resp.word_added.meaning_zh) : ""}<button class="link-btn goto-words">去复习</button></div></div>`);
+      const gw = box() && box().querySelector(".goto-words:last-of-type");
+      if (gw) gw.onclick = () => { memSub = "words"; document.querySelector('#tabs button[data-tab="memory"]').click(); };
       if (resp.reminder_set) {
         const needPush = !("Notification" in window) || Notification.permission !== "granted";
         append(`<div class="msg ai"><div class="chat-note">已设置提醒：${esc(resp.reminder_set.label)} · ${esc(resp.reminder_set.text)}${needPush ? `<button class="link-btn note-push-btn">开启通知</button>` : ""}</div></div>`);
@@ -951,9 +954,10 @@ async function renderMemory() {
   view.innerHTML = `
     <div class="card">
       <h2>长期记忆</h2>
-      <p class="desc">Buddy 关于你的持久记忆：对话攒多了自动归纳；清空对话时也会先提炼保留。图库照片同属长期记忆，不受对话清空影响。</p>
+      <p class="desc">Buddy 关于你的持久记忆：对话攒多了自动归纳；清空对话时也会先提炼保留。单词本、图库同属长期记忆，不受对话清空影响。</p>
       <div class="pill-row">
         <button class="pill ${memSub === "notes" ? "active" : ""}" data-sub="notes">记忆笔记</button>
+        <button class="pill ${memSub === "words" ? "active" : ""}" data-sub="words">单词本</button>
         <button class="pill ${memSub === "reminders" ? "active" : ""}" data-sub="reminders">提醒</button>
         <button class="pill ${memSub === "gallery" ? "active" : ""}" data-sub="gallery">图库</button>
       </div>
@@ -963,8 +967,209 @@ async function renderMemory() {
     p.onclick = () => { memSub = p.dataset.sub; renderMemory(); };
   });
   if (memSub === "notes") renderMemoryNotes($("#memBody"));
+  else if (memSub === "words") renderWords($("#memBody"));
   else if (memSub === "reminders") renderReminders($("#memBody"));
   else renderGalleryInto($("#memBody"));
+}
+
+/* ---- 单词本：对话中问到的生词自动收录 + 手动添加 + 间隔复习 ---- */
+function wordDueLabel(w, now) {
+  if (!w.reviews) return "新词 · 待首次复习";
+  const days = Math.ceil((w.due - now) / 86400);
+  return w.due <= now ? "到期，该复习了" : days <= 1 ? "明天复习" : `${days} 天后复习`;
+}
+async function renderWords(root) {
+  let d;
+  try { d = await api("/api/words"); } catch (e) {
+    root.innerHTML = `<p class="desc">加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+  const items = d.items || [];
+  const filterKey = (root.dataset.filter || "").toLowerCase();
+  const shown = filterKey ? items.filter((w) => (w.word + " " + (w.meaning_zh || "") + " " + (w.meaning_en || "")).toLowerCase().includes(filterKey)) : items;
+  root.innerHTML = `
+    <p class="desc">在对话里问 Buddy "<i>xxx 是什么意思</i>" 或 "<i>how do you say … in English</i>"，它会自动把生词记到这里。复习按间隔重复安排：认识 → 间隔拉长（1/2/4/7/15/30/60 天），忘了 → 6 小时后再来。</p>
+    <div class="stats-row">
+      <div class="stat"><div class="num">${items.length}</div><div class="cap">收录单词</div></div>
+      <div class="stat"><div class="num" style="color:${d.due ? "var(--danger)" : "inherit"}">${d.due}</div><div class="cap">今日待复习</div></div>
+      <div class="stat"><div class="num">${items.filter((w) => w.streak >= 3).length}</div><div class="cap">已基本掌握（连对 3 次+）</div></div>
+    </div>
+    <div style="margin:12px 0">
+      <button class="btn" id="btnQuizFlash" ${items.length ? "" : "disabled"}>抽词复习（看词想义）${d.due ? ` · ${d.due} 个到期` : ""}</button>
+      <button class="btn secondary" id="btnQuizRecall" ${items.length ? "" : "disabled"}>拼写背诵（看义写词）</button>
+    </div>
+    <div class="word-add">
+      <input id="wordNew" placeholder="手动添加：输入英文单词/短语（释义可留空，AI 自动补全）" maxlength="60">
+      <input id="wordNewZh" placeholder="中文释义（可选）" maxlength="60">
+      <button class="btn secondary" id="btnWordAdd">添加</button>
+    </div>
+    <div class="word-add" style="margin-top:6px">
+      <input id="wordFilter" placeholder="搜索单词本…" value="${esc(root.dataset.filter || "")}">
+    </div>
+    ${shown.length ? shown.map((w) => `
+      <div class="word-item" data-id="${w.id}">
+        <div class="word-main">
+          <div class="word-head"><b class="word-text">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button>
+            <span class="word-streak">${"●".repeat(Math.min(w.streak, 5))}${"○".repeat(Math.max(0, 5 - Math.min(w.streak, 5)))}</span></div>
+          <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
+          ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}
+          <div class="muted-sm">${w.date} 收录${w.source === "chat" ? "（对话中）" : ""} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}</div>
+        </div>
+        <button class="note-del word-del" data-id="${w.id}">删除</button>
+      </div>`).join("") : `<p class="desc">${items.length ? "没有匹配的单词。" : "单词本还是空的。去和 Buddy 聊天时问问不认识的词，或在上面手动添加。"}</p>`}`;
+  $("#btnQuizFlash").onclick = () => startWordQuiz("flash");
+  $("#btnQuizRecall").onclick = () => startWordQuiz("recall");
+  const addWord = async () => {
+    const word = $("#wordNew").value.trim();
+    if (!word) return;
+    $("#btnWordAdd").disabled = true;
+    $("#btnWordAdd").textContent = "添加中…";
+    try {
+      await api("/api/words", { json: { word, meaning_zh: $("#wordNewZh").value.trim() } });
+      renderWords(root);
+    } catch (e) { alert("添加失败：" + e.message); $("#btnWordAdd").disabled = false; $("#btnWordAdd").textContent = "添加"; }
+  };
+  $("#btnWordAdd").onclick = addWord;
+  $("#wordNew").onkeydown = (e) => { if (e.key === "Enter") addWord(); };
+  $("#wordFilter").oninput = (e) => { root.dataset.filter = e.target.value; renderWords(root); };
+  if (filterKey) { const f = $("#wordFilter"); f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
+  root.querySelectorAll(".word-say").forEach((b) => { b.onclick = () => speak(b.dataset.w); });
+  root.querySelectorAll(".word-del").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("删除这个单词？")) return;
+      try { await api(`/api/words/${b.dataset.id}`, { method: "DELETE" }); renderWords(root); }
+      catch (e) { alert("删除失败：" + e.message); }
+    };
+  });
+}
+
+/* 复习：flash = 看词想义（自评）；recall = 看中文/例句填空写出单词（自动判分） */
+async function startWordQuiz(mode) {
+  let d;
+  try { d = await api("/api/words/quiz?n=10"); } catch (e) { alert("加载失败：" + e.message); return; }
+  const items = d.items || [];
+  if (!items.length) { alert("单词本还是空的。"); return; }
+  const quiz = { mode, items, idx: 0, tally: { know: 0, unsure: 0, forgot: 0 } };
+  renderWordQuiz(quiz);
+}
+function blankOut(example, word) {
+  if (!example) return "";
+  const re = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"), "ig");
+  const blanked = example.replace(re, "_____");
+  return blanked === example ? example.replace(new RegExp(word.split(/\s+/)[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\w*", "ig"), "_____") : blanked;
+}
+function renderWordQuiz(quiz) {
+  const { mode, items, idx, tally } = quiz;
+  if (idx >= items.length) {
+    view.innerHTML = `
+      <div class="card">
+        <span class="step-tag">单词复习 · 完成</span>
+        <h2>这一轮复习结束</h2>
+        <div class="stats-row">
+          <div class="stat"><div class="num" style="color:var(--accent)">${tally.know}</div><div class="cap">认识 / 拼对</div></div>
+          <div class="stat"><div class="num">${tally.unsure}</div><div class="cap">模糊</div></div>
+          <div class="stat"><div class="num" style="color:var(--danger)">${tally.forgot}</div><div class="cap">忘了 / 拼错</div></div>
+        </div>
+        <p class="desc">认识的词会被推到更远的日期再考；忘了的 6 小时后就会再出现。每天来一轮，单词本会自己"变薄"。</p>
+        <div style="margin-top:12px">
+          <button class="btn" id="btnQuizMore">再来一轮</button>
+          <button class="btn secondary" id="btnQuizBack">返回单词本</button>
+        </div>
+      </div>`;
+    $("#btnQuizMore").onclick = () => startWordQuiz(mode);
+    $("#btnQuizBack").onclick = () => { memSub = "words"; renderMemory(); };
+    return;
+  }
+  const w = items[idx];
+  const progress = `${idx + 1} / ${items.length}`;
+  const grade = async (result) => {
+    tally[result]++;
+    try { await api(`/api/words/${w.id}/review`, { json: { result } }); } catch (_) {}
+    quiz.idx++;
+    renderWordQuiz(quiz);
+  };
+  const detail = `
+    <div class="word-reveal">
+      <div class="word-zh" style="font-size:18px">${esc(w.meaning_zh || "（无中文释义）")}</div>
+      ${w.meaning_en ? `<div class="muted-sm" style="margin-top:4px">${esc(w.meaning_en)}</div>` : ""}
+      ${w.example ? `<div class="word-ex" style="margin-top:8px">${esc(w.example)}</div>` : ""}
+    </div>`;
+  if (mode === "flash") {
+    view.innerHTML = `
+      <div class="card">
+        <span class="step-tag">单词复习 · 看词想义 · ${progress}</span>
+        <div class="flashcard">
+          <div class="flash-word">${esc(w.word)} <button class="link-btn" id="btnSay" style="font-size:22px">🔊</button></div>
+          <div class="muted-sm">先在心里说出意思和一个例句，再翻开</div>
+          <div id="flashBack" class="hidden">${detail}</div>
+        </div>
+        <div style="margin-top:14px" id="flashActions">
+          <button class="btn" id="btnFlip">翻开看释义</button>
+          <button class="btn ghost" id="btnQuizQuit">退出</button>
+        </div>
+      </div>`;
+    $("#btnSay").onclick = () => speak(w.word);
+    $("#btnQuizQuit").onclick = () => { memSub = "words"; renderMemory(); };
+    $("#btnFlip").onclick = () => {
+      $("#flashBack").classList.remove("hidden");
+      $("#flashActions").innerHTML = `
+        <button class="btn" id="gKnow">认识 ✓</button>
+        <button class="btn secondary" id="gUnsure">模糊</button>
+        <button class="btn secondary danger-btn" id="gForgot">忘了 ✗</button>`;
+      $("#gKnow").onclick = () => grade("know");
+      $("#gUnsure").onclick = () => grade("unsure");
+      $("#gForgot").onclick = () => grade("forgot");
+    };
+    return;
+  }
+  view.innerHTML = `
+    <div class="card">
+      <span class="step-tag">单词复习 · 看义写词 · ${progress}</span>
+      <div class="flashcard">
+        <div class="word-zh" style="font-size:20px">${esc(w.meaning_zh || w.meaning_en || "（无释义）")}</div>
+        ${w.meaning_zh && w.meaning_en ? `<div class="muted-sm" style="margin-top:4px">${esc(w.meaning_en)}</div>` : ""}
+        ${w.example ? `<div class="word-ex" style="margin-top:8px">${esc(blankOut(w.example, w.word))}</div>` : ""}
+        <div class="word-add" style="margin-top:12px">
+          <input id="recallInput" placeholder="写出这个英文单词/短语，回车提交" autocomplete="off" autocapitalize="off">
+          <button class="btn" id="btnRecallCheck">检查</button>
+        </div>
+        <div id="recallResult"></div>
+      </div>
+      <div style="margin-top:14px" id="recallActions">
+        <button class="btn ghost" id="btnRecallReveal">想不起来，看答案</button>
+        <button class="btn ghost" id="btnQuizQuit">退出</button>
+      </div>
+    </div>`;
+  const input = $("#recallInput");
+  input.focus();
+  $("#btnQuizQuit").onclick = () => { memSub = "words"; renderMemory(); };
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9' ]/g, "").replace(/\s+/g, " ").trim();
+  const showAnswer = (ok, typed) => {
+    input.disabled = true;
+    $("#btnRecallCheck").disabled = true;
+    $("#recallResult").innerHTML = `
+      <div class="result-box" style="margin-top:10px">
+        ${ok ? `<span class="score good">✓ 正确</span>` : `<span class="score low">✗ ${typed ? "拼错了" : "看答案"}</span>`}
+        <div style="margin-top:6px;font-size:20px;font-weight:700">${esc(w.word)} <button class="link-btn" id="btnSay2">🔊</button></div>
+        ${typed && !ok ? `<div class="muted-sm">你写的是：${esc(typed)}</div>` : ""}
+        ${w.example ? `<div class="word-ex" style="margin-top:6px">${esc(w.example)}</div>` : ""}
+      </div>`;
+    $("#btnSay2").onclick = () => speak(w.word);
+    speak(w.word);
+    $("#recallActions").innerHTML = ok
+      ? `<button class="btn" id="gNext">下一个 →</button>`
+      : `<button class="btn" id="gNext">记住了，下一个 →</button>`;
+    $("#gNext").onclick = () => grade(ok ? "know" : "forgot");
+    $("#gNext").focus();
+  };
+  const check = () => {
+    const typed = input.value.trim();
+    if (!typed) return;
+    showAnswer(norm(typed) === norm(w.word), typed);
+  };
+  $("#btnRecallCheck").onclick = check;
+  input.onkeydown = (e) => { if (e.key === "Enter") check(); };
+  $("#btnRecallReveal").onclick = () => showAnswer(false, "");
 }
 
 async function renderReminders(root) {

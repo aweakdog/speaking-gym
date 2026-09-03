@@ -202,6 +202,21 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .chat-note { max-width: 82%; background: var(--accent-soft); color: var(--accent); border-radius: 10px; padding: 7px 12px; font-size: 13px; }
 .chat-note .link-btn { margin-left: 6px; font-size: 13px; }
 
+/* 单词本 */
+.word-add { display: flex; gap: 8px; flex-wrap: wrap; }
+.word-add input { flex: 1; min-width: 160px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 14.5px; font-family: inherit; }
+.word-add input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.word-item { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.word-main { flex: 1; min-width: 0; }
+.word-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.word-text { font-size: 17px; }
+.word-streak { color: var(--accent); font-size: 11px; letter-spacing: 2px; }
+.word-zh { font-size: 14.5px; margin-top: 3px; }
+.word-ex { font-size: 14px; color: var(--muted); font-style: italic; margin-top: 3px; }
+.flashcard { background: var(--accent-soft); border-radius: 16px; padding: 28px 22px; text-align: center; margin-top: 12px; }
+.flash-word { font-size: 34px; font-weight: 800; letter-spacing: 0.3px; margin-bottom: 8px; }
+.word-reveal { margin-top: 16px; padding-top: 14px; border-top: 1px dashed rgba(0,0,0,0.12); text-align: left; }
+
 /* 词汇量测试 */
 .vocab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 8px; margin-top: 12px; }
 .vword { border: 1.5px solid var(--border); background: #fff; border-radius: 10px; padding: 10px 6px; font-size: 15px; cursor: pointer; font-family: inherit; color: var(--ink); transition: all 0.1s; }
