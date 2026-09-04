@@ -132,6 +132,8 @@ def init_db():
             c.execute("ALTER TABLE chat_messages ADD COLUMN typed_note TEXT")
         if "photo_id" not in ccols:
             c.execute("ALTER TABLE chat_messages ADD COLUMN photo_id INTEGER")
+        if "words_json" not in ccols:
+            c.execute("ALTER TABLE chat_messages ADD COLUMN words_json TEXT")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -500,7 +502,9 @@ CHAT_SYSTEM_TMPL = (
     "in your reply as usual and end with a short note like \"— added to your word book\". Words that are merely the "
     "OBJECT of the question count as asked-about even when they look basic (asking big vs huge vs enormous means "
     "they want the nuance — put that nuance in meaning_en); but do NOT add words the learner simply used correctly "
-    "inside their own sentences. When nothing was asked about, use []. The system message may include a WORD BOOK "
+    "inside their own sentences. When nothing was asked about, use []. Examples — learner: \"big, huge, enormous 有什么"
+    "区别？\" → new_words has three items (big / huge / enormous); learner: \"What does 'hit a wall' mean?\" → one "
+    "item; learner: \"I had a huge breakfast\" → []. The system message may include a WORD BOOK "
     "block (their saved words, most recent first, plus how many are due for review): casually reuse one of those "
     "words when it fits the conversation so it sticks, and if several are due and the chat is idle, you may "
     "suggest a quick review in the 长期记忆 → 单词本 tab.\n"
@@ -959,7 +963,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         mem = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
         urow = c.execute("SELECT chat_fix_level FROM users WHERE id=?", (uid,)).fetchone()
         recent = [dict(r) for r in c.execute(
-            "SELECT ts, role, content, channel, typed_note, photo_id FROM chat_messages "
+            "SELECT ts, role, content, channel, typed_note, photo_id, words_json FROM chat_messages "
             "WHERE user_id=? ORDER BY id DESC LIMIT 16",
             (uid,)
         ).fetchall()][::-1]
@@ -984,8 +988,13 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
     for m in recent:
         if m["role"] == "assistant":
             # 历史 assistant 消息统一还原成完整 JSON 形态，让模型持续模仿全字段输出格式
+            # 历史里真实收录过的词原样回放，避免模型从一串 [] 中学到“从不收录”
+            try:
+                past_words = json.loads(m["words_json"]) if m.get("words_json") else []
+            except Exception:
+                past_words = []
             msgs.append({"role": "assistant", "content": json.dumps(
-                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None, "new_words": []},
+                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None, "new_words": past_words},
                 ensure_ascii=False)})
         else:
             ttag = "[time %s] " % datetime.fromtimestamp((m["ts"] or 0) / 1000).strftime("%m-%d %H:%M")
@@ -1043,7 +1052,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             sys.stderr.write("reminder parse failed: %s (%r)\n" % (e, rem))
 
     # 单词本：学习者问到不认识的词，自动收录（支持一次多个，如"A 和 B 的区别"）
-    words_added = []
+    words_added, words_for_history = [], []
     raw_words = data.get("new_words")
     if isinstance(raw_words, dict):
         raw_words = [raw_words]
@@ -1058,6 +1067,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             if saved:
                 words_added.append({"id": saved["id"], "word": saved["word"],
                                     "meaning_zh": str(nw.get("meaning_zh") or "")[:300], "new": saved["new"]})
+                words_for_history.append({k: str(nw.get(k) or "")[:300] for k in ("word", "meaning_en", "meaning_zh", "example")})
         except Exception as e:
             sys.stderr.write("word save failed: %s\n" % e)
 
@@ -1079,8 +1089,9 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             (uid, now, "user", text, channel, typed_note, photo_id),
         )
         c.execute(
-            "INSERT INTO chat_messages (user_id, ts, role, content, fix_json) VALUES (?,?,?,?,?)",
-            (uid, now + 1, "assistant", reply, json.dumps(fix, ensure_ascii=False) if fix else None),
+            "INSERT INTO chat_messages (user_id, ts, role, content, fix_json, words_json) VALUES (?,?,?,?,?,?)",
+            (uid, now + 1, "assistant", reply, json.dumps(fix, ensure_ascii=False) if fix else None,
+             json.dumps(words_for_history, ensure_ascii=False) if words_for_history else None),
         )
         if photo_id:
             c.execute("UPDATE photos SET caption=? WHERE id=? AND user_id=?", (text[:300], int(photo_id), uid))
