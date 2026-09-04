@@ -820,7 +820,10 @@ async function renderChat() {
       else if (ph) ph.remove();
       append(chatBubble("ai", resp.reply, resp.fix));
       if (resp.memory_added) append(`<div class="msg ai"><div class="chat-note">已记入长期记忆：${esc(resp.memory_added)}</div></div>`);
-      if (resp.word_added) append(`<div class="msg ai"><div class="chat-note">📒 ${resp.word_added.new ? "已加入单词本" : "单词本已有此词，释义已更新"}：<b>${esc(resp.word_added.word)}</b>${resp.word_added.meaning_zh ? " · " + esc(resp.word_added.meaning_zh) : ""}<button class="link-btn goto-words">去复习</button></div></div>`);
+      if (resp.words_added && resp.words_added.length) {
+        const list = resp.words_added.map((w) => `<b>${esc(w.word)}</b>${w.meaning_zh ? " · " + esc(w.meaning_zh) : ""}${w.new ? "" : "（已有，释义已更新）"}`).join("；");
+        append(`<div class="msg ai"><div class="chat-note">📒 已加入单词本：${list}<button class="link-btn goto-words">去复习</button></div></div>`);
+      }
       const gw = box() && box().querySelector(".goto-words:last-of-type");
       if (gw) gw.onclick = () => { memSub = "words"; document.querySelector('#tabs button[data-tab="memory"]').click(); };
       if (resp.reminder_set) {

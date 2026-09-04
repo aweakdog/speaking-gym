@@ -492,18 +492,20 @@ CHAT_SYSTEM_TMPL = (
     "when relevant (praise progress, nudge gaps), but never dump raw data.\n"
     "12. Word book: whenever the learner asks what an English word or phrase means, how to use or pronounce it, "
     "how to say something in English (\"X 是什么意思\", \"what does X mean\", \"how do you say ... in English\"), or "
-    "asks about an expression YOU just used, fill new_word: word (dictionary/lemma form, or the phrase), "
-    "meaning_en (one short plain-English definition), meaning_zh (concise Chinese), example (one natural sentence "
-    "using it — ideally about the learner's own life). Explain it in your reply as usual and end with a short "
-    "note like \"— added to your word book\". Only one word per turn (the main one asked about); never add words "
-    "the learner already used correctly themselves; otherwise null. The system message may include a WORD BOOK "
+    "asks about an expression YOU just used, fill new_words with EVERY word or phrase they asked about — usually "
+    "one, up to three (e.g. \"what's the difference between A and B\" → both A and B; \"how do you say X\" → the "
+    "best natural expression). Each item: word (dictionary/lemma form, or the phrase), meaning_en (one short "
+    "plain-English definition; for compared words, make the difference visible in the definitions), meaning_zh "
+    "(concise Chinese), example (one natural sentence using it — ideally about the learner's own life). Explain "
+    "in your reply as usual and end with a short note like \"— added to your word book\". Never add words the "
+    "learner already used correctly themselves; when nothing was asked about, use []. The system message may include a WORD BOOK "
     "block (their saved words, most recent first, plus how many are due for review): casually reuse one of those "
     "words when it fits the conversation so it sticks, and if several are due and the chat is idle, you may "
     "suggest a quick review in the 长期记忆 → 单词本 tab.\n"
     'Respond with JSON ONLY: {{"reply": "...", "fix": {{"original": "...", "better": "...", "why_zh": "..."}} or '
     'null, "memory_add": "..." or null, "reminder": {{"text": "...", "type": "...", "weekday": 0, "time": "HH:MM", '
-    '"datetime": "..."}} or null, "new_word": {{"word": "...", "meaning_en": "...", "meaning_zh": "...", '
-    '"example": "..."}} or null}}'
+    '"datetime": "..."}} or null, "new_words": [{{"word": "...", "meaning_en": "...", "meaning_zh": "...", '
+    '"example": "..."}}] or []}}'
 )
 
 DEFINE_WORD_SYSTEM = (
@@ -981,7 +983,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         if m["role"] == "assistant":
             # 历史 assistant 消息统一还原成完整 JSON 形态，让模型持续模仿全字段输出格式
             msgs.append({"role": "assistant", "content": json.dumps(
-                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None, "new_word": None},
+                {"reply": m["content"], "fix": None, "memory_add": None, "reminder": None, "new_words": []},
                 ensure_ascii=False)})
         else:
             ttag = "[time %s] " % datetime.fromtimestamp((m["ts"] or 0) / 1000).strftime("%m-%d %H:%M")
@@ -1038,16 +1040,22 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         except Exception as e:
             sys.stderr.write("reminder parse failed: %s (%r)\n" % (e, rem))
 
-    # 单词本：学习者问到不认识的词，自动收录
-    word_added = None
-    nw = data.get("new_word") if isinstance(data.get("new_word"), dict) else None
-    if nw and clean_word(nw.get("word")):
+    # 单词本：学习者问到不认识的词，自动收录（支持一次多个，如"A 和 B 的区别"）
+    words_added = []
+    raw_words = data.get("new_words")
+    if isinstance(raw_words, dict):
+        raw_words = [raw_words]
+    if not isinstance(raw_words, list):  # 兼容旧字段
+        raw_words = [data["new_word"]] if isinstance(data.get("new_word"), dict) else []
+    for nw in raw_words[:3]:
+        if not isinstance(nw, dict) or not clean_word(nw.get("word")):
+            continue
         try:
             saved = upsert_word(uid, nw.get("word"), nw.get("meaning_en"), nw.get("meaning_zh"), nw.get("example"),
                                 context=text[:300], source="chat")
             if saved:
-                word_added = {"id": saved["id"], "word": saved["word"], "meaning_zh": str(nw.get("meaning_zh") or "")[:300],
-                              "new": saved["new"]}
+                words_added.append({"id": saved["id"], "word": saved["word"],
+                                    "meaning_zh": str(nw.get("meaning_zh") or "")[:300], "new": saved["new"]})
         except Exception as e:
             sys.stderr.write("word save failed: %s\n" % e)
 
@@ -1078,7 +1086,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         threading.Thread(target=tag_photo, args=(int(photo_id), text, photo_desc, reply), daemon=True).start()
     threading.Thread(target=maybe_summarize, args=(uid,), daemon=True).start()
     return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None,
-            "memory_added": memory_added, "reminder_set": reminder_set, "word_added": word_added}
+            "memory_added": memory_added, "reminder_set": reminder_set, "words_added": words_added}
 
 
 def check_password(user, pw):
