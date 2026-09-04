@@ -547,9 +547,10 @@ VOCAB_QUESTION_RES = [
                r"\bthe chinese\b|\bchinese (?:word|term|concept|idiom|saying|expression)s?\b))", re.I | re.S),
     re.compile(r"英文里|英语里|用英语|用英文|英文叫|英语叫|对应的英文|对应的英语|英文是什么|英语是什么|翻译成英文|翻译成英语"),
     # "what is rhetorical" / "what's a metaphor" —— 宾语 ≤3 词、只允许 a/an 冠词；"what is the/your/it…" 是在问事物而非词义
-    re.compile(r"^\s*what(?:'s| is| are)\s+(?:an?\s+)?['\"“‘]?(?!(?:the|your|my|our|their|his|her|its|this|that|it|there|"
+    re.compile(r"^\s*(?:(?:wait|so|hmm+|and|but|ok|okay|also|btw|then|oh|sorry|hey|buddy)[,\s]+)*"
+               r"what(?:'s| is| are| was)\s+(?:an?\s+)?['\"“‘]?(?!(?:the|your|my|our|their|his|her|its|this|that|it|there|"
                r"you|we|they|he|she|i|up|going|happening|wrong|next|new|today|time|weather|on|for|in|at|about|like|with)\b)"
-               r"[A-Za-z']+(?:[ -][A-Za-z']+){0,2}['\"”’]?\s*[?？]?\s*$", re.I),
+               r"[A-Za-z']+(?:[ -][A-Za-z']+){0,2}['\"”’]?(?:\s+(?:again|exactly|actually|then|though))?\s*[?？!]?\s*$", re.I),
 ]
 # 命中上面最后一条"what is X"时，X 若含这些词多半是在问事实/近况而非词义
 VOCAB_QUESTION_VETO = re.compile(r"\b(?:famous|doing|for|about|like|now|today|tonight|tomorrow|yesterday|here|there)\b", re.I)
