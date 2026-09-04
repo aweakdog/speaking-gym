@@ -498,9 +498,11 @@ CHAT_SYSTEM_TMPL = (
     "when relevant (praise progress, nudge gaps), but never dump raw data.\n"
     "12. Word book: whenever the learner asks what an English word or phrase means, how to use or pronounce it, "
     "how to say something in English (\"X 是什么意思\", \"what does X mean\", \"how do you say ... in English\"), or "
-    "asks about an expression YOU just used, fill new_words with EVERY word or phrase they asked about — usually "
-    "one, up to three (e.g. \"what's the difference between A and B\" → both A and B; \"how do you say X\" → the "
-    "best natural expression). Each item: word (dictionary/lemma form, or the phrase), meaning_en (one short "
+    "asks about an expression YOU just used, or asks what English concepts/terms correspond to Chinese ones, fill "
+    "new_words with EVERY word or phrase they asked about — usually one, up to six (e.g. \"what's the difference "
+    "between A and B\" → both A and B; \"how do you say X\" → the best natural expression; \"what corresponds to "
+    "比喻 拟人 类比 排比 in English\" → simile/metaphor, personification, analogy, parallelism — one item per term). "
+    "Each item: word (dictionary/lemma form, or the phrase), meaning_en (one short "
     "plain-English definition; for compared words, make the difference visible in the definitions), meaning_zh "
     "(concise Chinese), example (one natural sentence using it — ideally about the learner's own life). Explain "
     "in your reply as usual and end with a short note like \"— added to your word book\". Words that are merely the "
@@ -520,9 +522,10 @@ CHAT_SYSTEM_TMPL = (
 
 WORD_EXTRACT_SYSTEM = (
     "A Chinese learner asked an English tutor a vocabulary question and the tutor answered. List every English word "
-    "or phrase the LEARNER ASKED ABOUT (usually 1-3: the object of the question, e.g. \"what is rhetorical\" → "
+    "or phrase the LEARNER ASKED ABOUT (usually 1-6: the object of the question, e.g. \"what is rhetorical\" → "
     "rhetorical; \"difference between big and huge\" → both; \"how do you say 内卷\" → the best natural expression "
-    "from the answer). Skip words the learner merely used in their own sentence. For each: word (lemma/phrase), "
+    "from the answer; \"what corresponds to 比喻 拟人 排比 in English\" → the English term the tutor gave for EACH "
+    "Chinese concept). Skip words the learner merely used in their own sentence. For each: word (lemma/phrase), "
     "meaning_en (<= 20 words, taken from the tutor's explanation), meaning_zh (concise), example (one natural sentence, "
     "from the answer if present). JSON ONLY: {\"words\": [{\"word\": \"...\", \"meaning_en\": \"...\", \"meaning_zh\": "
     "\"...\", \"example\": \"...\"}]} — or {\"words\": []} if the learner did not actually ask about any word: e.g. they "
@@ -537,6 +540,11 @@ VOCAB_QUESTION_RES = [
     re.compile(r"\bhow (?:do|would|can|should) (?:you|i|we) (?:say|use|pronounce)\b", re.I),
     re.compile(r"\bhow to (?:say|use|pronounce)\b", re.I),
     re.compile(r"\b(?:define|definition of|meaning of|what do you mean by)\b", re.I),
+    # 问"中文概念/词的英文是什么"：句子里同时出现汉字 + in English / English word|term|equivalent / correspond / translate
+    re.compile(r"(?=.*[\u4e00-\u9fff])(?=.*(?:\bin (?:english|enligsh|englsih)\b|\b(?:english|enligsh) (?:word|term|equivalent|"
+               r"version|concept|expression|name|phrase)s?\b|\bcorrespond\w*|\bequivalen\w*|\btranslat\w*|\bexpress\b|"
+               r"\bthe chinese\b|\bchinese (?:word|term|concept|idiom|saying|expression)s?\b))", re.I | re.S),
+    re.compile(r"英文里|英语里|用英语|用英文|英文叫|英语叫|对应的英文|对应的英语|英文是什么|英语是什么|翻译成英文|翻译成英语"),
     # "what is rhetorical" / "what's a metaphor" —— 宾语 ≤3 词、只允许 a/an 冠词；"what is the/your/it…" 是在问事物而非词义
     re.compile(r"^\s*what(?:'s| is| are)\s+(?:an?\s+)?['\"“‘]?(?!(?:the|your|my|our|their|his|her|its|this|that|it|there|"
                r"you|we|they|he|she|i|up|going|happening|wrong|next|new|today|time|weather|on|for|in|at|about|like|with)\b)"
@@ -559,7 +567,7 @@ def extract_asked_words(question, answer):
         temperature=0.0, max_tokens=400,
     ))
     words = data.get("words") if isinstance(data, dict) else None
-    return [w for w in words if isinstance(w, dict) and clean_word(w.get("word"))][:3] if isinstance(words, list) else []
+    return [w for w in words if isinstance(w, dict) and clean_word(w.get("word"))][:6] if isinstance(words, list) else []
 
 
 DEFINE_WORD_SYSTEM = (
@@ -1151,7 +1159,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
                 sys.stderr.write("word fallback extracted: %s\n" % [w.get("word") for w in raw_words])
         except Exception as e:
             sys.stderr.write("word extract failed: %s\n" % e)
-    for nw in raw_words[:3]:
+    for nw in raw_words[:6]:
         if not isinstance(nw, dict) or not clean_word(nw.get("word")):
             continue
         try:
