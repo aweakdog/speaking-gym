@@ -518,6 +518,50 @@ CHAT_SYSTEM_TMPL = (
     '"example": "..."}}] or []}}'
 )
 
+WORD_EXTRACT_SYSTEM = (
+    "A Chinese learner asked an English tutor a vocabulary question and the tutor answered. List every English word "
+    "or phrase the LEARNER ASKED ABOUT (usually 1-3: the object of the question, e.g. \"what is rhetorical\" → "
+    "rhetorical; \"difference between big and huge\" → both; \"how do you say 内卷\" → the best natural expression "
+    "from the answer). Skip words the learner merely used in their own sentence. For each: word (lemma/phrase), "
+    "meaning_en (<= 20 words, taken from the tutor's explanation), meaning_zh (concise), example (one natural sentence, "
+    "from the answer if present). JSON ONLY: {\"words\": [{\"word\": \"...\", \"meaning_en\": \"...\", \"meaning_zh\": "
+    "\"...\", \"example\": \"...\"}]} — or {\"words\": []} if the learner did not actually ask about any word: e.g. they "
+    "asked about a proper noun (a game, brand, person, place, movie), a fact, or their own plans/scores."
+)
+
+# 服务端启发式：像是在问词义/用法/说法的消息（命中且模型没填 new_words 时，触发提词器兜底）
+VOCAB_QUESTION_RES = [
+    re.compile(r"是什么意思|什么意思|啥意思|怎么说|怎么用|英语怎么说|英文怎么说|有什么区别|区别是|什么区别"),
+    re.compile(r"\bwhat(?:'s| is| does| do)\b.*\b(?:mean|meaning)\b", re.I),
+    re.compile(r"\bdifference between\b", re.I),
+    re.compile(r"\bhow (?:do|would|can|should) (?:you|i|we) (?:say|use|pronounce)\b", re.I),
+    re.compile(r"\bhow to (?:say|use|pronounce)\b", re.I),
+    re.compile(r"\b(?:define|definition of|meaning of|what do you mean by)\b", re.I),
+    # "what is rhetorical" / "what's a metaphor" —— 宾语 ≤3 词、只允许 a/an 冠词；"what is the/your/it…" 是在问事物而非词义
+    re.compile(r"^\s*what(?:'s| is| are)\s+(?:an?\s+)?['\"“‘]?(?!(?:the|your|my|our|their|his|her|its|this|that|it|there|"
+               r"you|we|they|he|she|i|up|going|happening|wrong|next|new|today|time|weather|on|for|in|at|about|like|with)\b)"
+               r"[A-Za-z']+(?:[ -][A-Za-z']+){0,2}['\"”’]?\s*[?？]?\s*$", re.I),
+]
+# 命中上面最后一条"what is X"时，X 若含这些词多半是在问事实/近况而非词义
+VOCAB_QUESTION_VETO = re.compile(r"\b(?:famous|doing|for|about|like|now|today|tonight|tomorrow|yesterday|here|there)\b", re.I)
+
+
+def looks_like_vocab_question(text):
+    if any(r.search(text) for r in VOCAB_QUESTION_RES[:-1]):
+        return True
+    return bool(VOCAB_QUESTION_RES[-1].search(text)) and not VOCAB_QUESTION_VETO.search(text)
+
+
+def extract_asked_words(question, answer):
+    data = parse_chat_json(deepseek_call(
+        [{"role": "system", "content": WORD_EXTRACT_SYSTEM},
+         {"role": "user", "content": "LEARNER: %s\n\nTUTOR: %s" % (question[:600], answer[:1500])}],
+        temperature=0.0, max_tokens=400,
+    ))
+    words = data.get("words") if isinstance(data, dict) else None
+    return [w for w in words if isinstance(w, dict) and clean_word(w.get("word"))][:3] if isinstance(words, list) else []
+
+
 DEFINE_WORD_SYSTEM = (
     "You are a concise English-Chinese learner's dictionary for a Chinese intermediate learner. Given a word or "
     "phrase, return JSON ONLY: {\"word\": dictionary/lemma form, \"meaning_en\": one plain-English definition "
@@ -1099,6 +1143,14 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         raw_words = [raw_words]
     if not isinstance(raw_words, list):  # 兼容旧字段
         raw_words = [data["new_word"]] if isinstance(data.get("new_word"), dict) else []
+    if not raw_words and looks_like_vocab_question(text):
+        # 模型漏填时的确定性兜底：专职提词器从"问 + 答"里抽出被问到的词
+        try:
+            raw_words = extract_asked_words(text, reply)
+            if raw_words:
+                sys.stderr.write("word fallback extracted: %s\n" % [w.get("word") for w in raw_words])
+        except Exception as e:
+            sys.stderr.write("word extract failed: %s\n" % e)
     for nw in raw_words[:3]:
         if not isinstance(nw, dict) or not clean_word(nw.get("word")):
             continue
