@@ -1156,8 +1156,7 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         # 模型漏填时的确定性兜底：专职提词器从"问 + 答"里抽出被问到的词
         try:
             raw_words = extract_asked_words(text, reply)
-            if raw_words:
-                sys.stderr.write("word fallback extracted: %s\n" % [w.get("word") for w in raw_words])
+            sys.stderr.write("word fallback extracted: %s\n" % ([w.get("word") for w in raw_words] or "nothing"))
         except Exception as e:
             sys.stderr.write("word extract failed: %s\n" % e)
     for nw in raw_words[:6]:
