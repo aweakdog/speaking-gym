@@ -213,6 +213,14 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .word-streak { color: var(--accent); font-size: 11px; letter-spacing: 2px; }
 .word-zh { font-size: 14.5px; margin-top: 3px; }
 .word-ex { font-size: 14px; color: var(--muted); font-style: italic; margin-top: 3px; }
+.word-log { margin-top: 6px; font-size: 13.5px; text-align: left; }
+.word-log summary { cursor: pointer; color: var(--accent); font-weight: 600; list-style: none; }
+.word-log summary::before { content: "▸ "; }
+.word-log[open] summary::before { content: "▾ "; }
+.word-log-item { margin-top: 8px; padding: 10px 12px; background: #fff; border: 1px solid var(--border); border-radius: 10px; line-height: 1.65; }
+.word-log-date { color: var(--muted); font-size: 12px; }
+.word-log-q { margin-top: 4px; }
+.word-log-a { margin-top: 6px; white-space: pre-wrap; }
 .flashcard { background: var(--accent-soft); border-radius: 16px; padding: 28px 22px; text-align: center; margin-top: 12px; }
 .flash-word { font-size: 34px; font-weight: 800; letter-spacing: 0.3px; margin-bottom: 8px; }
 .word-reveal { margin-top: 16px; padding-top: 14px; border-top: 1px dashed rgba(0,0,0,0.12); text-align: left; }

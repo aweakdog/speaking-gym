@@ -981,6 +981,20 @@ function wordDueLabel(w, now) {
   const days = Math.ceil((w.due - now) / 86400);
   return w.due <= now ? "到期，该复习了" : days <= 1 ? "明天复习" : `${days} 天后复习`;
 }
+/* 学习记录：当时"你问 / Buddy 答"的原文，展开即可回到学这个词的情景 */
+function wordExchangesHtml(w, open = false) {
+  const list = w.exchanges || [];
+  if (!list.length) return "";
+  return `<details class="word-log" ${open ? "open" : ""}>
+    <summary>学习记录 · 当时和 Buddy 的对话（${list.length}）</summary>
+    ${list.map((x) => `
+      <div class="word-log-item">
+        <div class="word-log-date">${new Date(x.ts * 1000).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</div>
+        <div class="word-log-q"><b>你：</b>${esc(x.q)}</div>
+        <div class="word-log-a"><b>Buddy：</b>${esc(x.a)}</div>
+      </div>`).join("")}
+  </details>`;
+}
 async function renderWords(root) {
   let d;
   try { d = await api("/api/words"); } catch (e) {
@@ -1016,7 +1030,9 @@ async function renderWords(root) {
             <span class="word-streak">${"●".repeat(Math.min(w.streak, 5))}${"○".repeat(Math.max(0, 5 - Math.min(w.streak, 5)))}</span></div>
           <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
           ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}
-          <div class="muted-sm">${w.date} 收录${w.source === "chat" ? "（对话中）" : ""} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}</div>
+          ${wordExchangesHtml(w)}
+          <div class="muted-sm">${w.date} · ${w.source === "chat" ? "和 Buddy 聊到的" : "手动添加"} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
+            ${w.source !== "chat" && !(w.exchanges || []).length ? `<button class="link-btn word-ask" data-w="${esc(w.word)}">让 Buddy 讲讲这个词</button>` : ""}</div>
         </div>
         <button class="note-del word-del" data-id="${w.id}">删除</button>
       </div>`).join("") : `<p class="desc">${items.length ? "没有匹配的单词。" : "单词本还是空的。去和 Buddy 聊天时问问不认识的词，或在上面手动添加。"}</p>`}`;
@@ -1037,6 +1053,9 @@ async function renderWords(root) {
   $("#wordFilter").oninput = (e) => { root.dataset.filter = e.target.value; renderWords(root); };
   if (filterKey) { const f = $("#wordFilter"); f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
   root.querySelectorAll(".word-say").forEach((b) => { b.onclick = () => speak(b.dataset.w); });
+  root.querySelectorAll(".word-ask").forEach((b) => {
+    b.onclick = () => askBuddyAbout(b.dataset.w);
+  });
   root.querySelectorAll(".word-del").forEach((b) => {
     b.onclick = async () => {
       if (!confirm("删除这个单词？")) return;
@@ -1044,6 +1063,18 @@ async function renderWords(root) {
       catch (e) { alert("删除失败：" + e.message); }
     };
   });
+}
+
+/* 跳到对话页并预填提问，让手动添加的词也能生成一段学习记录 */
+function askBuddyAbout(word) {
+  document.querySelector('#tabs button[data-tab="chat"]').click();
+  let tries = 0;
+  const fill = () => {
+    const input = $("#chatText");
+    if (input) { input.value = `Can you explain "${word}" — what it means, how to use it, and give me two natural examples?`; input.focus(); }
+    else if (tries++ < 20) setTimeout(fill, 100);
+  };
+  fill();
 }
 
 /* 复习：flash = 看词想义（自评）；recall = 看中文/例句填空写出单词（自动判分） */
@@ -1096,6 +1127,7 @@ function renderWordQuiz(quiz) {
       <div class="word-zh" style="font-size:18px">${esc(w.meaning_zh || "（无中文释义）")}</div>
       ${w.meaning_en ? `<div class="muted-sm" style="margin-top:4px">${esc(w.meaning_en)}</div>` : ""}
       ${w.example ? `<div class="word-ex" style="margin-top:8px">${esc(w.example)}</div>` : ""}
+      ${wordExchangesHtml(w)}
     </div>`;
   if (mode === "flash") {
     view.innerHTML = `
@@ -1156,6 +1188,7 @@ function renderWordQuiz(quiz) {
         <div style="margin-top:6px;font-size:20px;font-weight:700">${esc(w.word)} <button class="link-btn" id="btnSay2">🔊</button></div>
         ${typed && !ok ? `<div class="muted-sm">你写的是：${esc(typed)}</div>` : ""}
         ${w.example ? `<div class="word-ex" style="margin-top:6px">${esc(w.example)}</div>` : ""}
+        ${wordExchangesHtml(w, !ok)}
       </div>`;
     $("#btnSay2").onclick = () => speak(w.word);
     speak(w.word);

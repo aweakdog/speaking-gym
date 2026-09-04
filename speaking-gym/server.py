@@ -134,6 +134,10 @@ def init_db():
             c.execute("ALTER TABLE chat_messages ADD COLUMN photo_id INTEGER")
         if "words_json" not in ccols:
             c.execute("ALTER TABLE chat_messages ADD COLUMN words_json TEXT")
+        if c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vocab_words'").fetchone():
+            wcols = [r[1] for r in c.execute("PRAGMA table_info(vocab_words)")]
+            if "exchanges" not in wcols:
+                c.execute("ALTER TABLE vocab_words ADD COLUMN exchanges TEXT")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,7 +169,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             word TEXT NOT NULL, word_key TEXT NOT NULL,
-            meaning_en TEXT, meaning_zh TEXT, example TEXT, context TEXT,
+            meaning_en TEXT, meaning_zh TEXT, example TEXT, context TEXT, exchanges TEXT,
             source TEXT, created INTEGER, date TEXT,
             reviews INTEGER DEFAULT 0, correct INTEGER DEFAULT 0, streak INTEGER DEFAULT 0,
             due INTEGER DEFAULT 0, last_reviewed INTEGER,
@@ -589,7 +593,23 @@ def word_key(word):
     return re.sub(r"[^a-z0-9' -]", "", word.lower()).strip()
 
 
-def upsert_word(uid, word, meaning_en="", meaning_zh="", example="", context="", source="chat"):
+MAX_WORD_EXCHANGES = 3  # 每个词最多保留最近 3 段"你问 / Buddy 答"的学习记录
+
+
+def merge_exchanges(existing_json, exchange):
+    try:
+        items = json.loads(existing_json) if existing_json else []
+    except Exception:
+        items = []
+    if exchange and exchange.get("a"):
+        ex = {"ts": int(exchange.get("ts") or time.time()), "q": str(exchange.get("q") or "")[:600],
+              "a": str(exchange.get("a") or "")[:2000]}
+        if not any(i.get("ts") == ex["ts"] for i in items):
+            items.append(ex)
+    return json.dumps(items[-MAX_WORD_EXCHANGES:], ensure_ascii=False) if items else None
+
+
+def upsert_word(uid, word, meaning_en="", meaning_zh="", example="", context="", source="chat", exchange=None):
     word = clean_word(word)
     if not word:
         return None
@@ -598,21 +618,42 @@ def upsert_word(uid, word, meaning_en="", meaning_zh="", example="", context="",
         return None
     now = int(time.time())
     with db() as c:
-        row = c.execute("SELECT id FROM vocab_words WHERE user_id=? AND word_key=?", (uid, key)).fetchone()
+        row = c.execute("SELECT id, exchanges FROM vocab_words WHERE user_id=? AND word_key=?", (uid, key)).fetchone()
         if row:
             c.execute(
                 "UPDATE vocab_words SET meaning_en=COALESCE(NULLIF(?, ''), meaning_en), "
-                "meaning_zh=COALESCE(NULLIF(?, ''), meaning_zh), example=COALESCE(NULLIF(?, ''), example) WHERE id=?",
-                (str(meaning_en or "")[:300], str(meaning_zh or "")[:300], str(example or "")[:300], row["id"]),
+                "meaning_zh=COALESCE(NULLIF(?, ''), meaning_zh), example=COALESCE(NULLIF(?, ''), example), "
+                "exchanges=? WHERE id=?",
+                (str(meaning_en or "")[:300], str(meaning_zh or "")[:300], str(example or "")[:300],
+                 merge_exchanges(row["exchanges"], exchange), row["id"]),
             )
             return {"id": row["id"], "word": word, "new": False}
         cur = c.execute(
-            "INSERT INTO vocab_words (user_id, word, word_key, meaning_en, meaning_zh, example, context, source, "
-            "created, date, due) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO vocab_words (user_id, word, word_key, meaning_en, meaning_zh, example, context, exchanges, "
+            "source, created, date, due) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (uid, word, key, str(meaning_en or "")[:300], str(meaning_zh or "")[:300], str(example or "")[:300],
-             str(context or "")[:300], source, now, date.today().isoformat(), now),
+             str(context or "")[:300], merge_exchanges(None, exchange), source, now, date.today().isoformat(), now),
         )
         return {"id": cur.lastrowid, "word": word, "new": True}
+
+
+def backfill_word_exchanges(uid, rows):
+    """早期收录的词只存了提问原文：从聊天记录里找回当时 Buddy 的回答，补成完整学习记录。"""
+    for w in rows:
+        if w.get("exchanges") or w.get("source") != "chat" or not w.get("context"):
+            continue
+        with db() as c:
+            q = c.execute("SELECT id, ts FROM chat_messages WHERE user_id=? AND role='user' AND content=? "
+                          "ORDER BY id DESC LIMIT 1", (uid, w["context"])).fetchone()
+            if not q:
+                continue
+            a = c.execute("SELECT content FROM chat_messages WHERE user_id=? AND role='assistant' AND id>? "
+                          "ORDER BY id ASC LIMIT 1", (uid, q["id"])).fetchone()
+            if not a:
+                continue
+            merged = merge_exchanges(None, {"ts": (q["ts"] or 0) // 1000, "q": w["context"], "a": a["content"]})
+            c.execute("UPDATE vocab_words SET exchanges=? WHERE id=?", (merged, w["id"]))
+            w["exchanges"] = merged
 
 
 def define_word(word):
@@ -1063,7 +1104,8 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             continue
         try:
             saved = upsert_word(uid, nw.get("word"), nw.get("meaning_en"), nw.get("meaning_zh"), nw.get("example"),
-                                context=text[:300], source="chat")
+                                context=text[:300], source="chat",
+                                exchange={"ts": int(time.time()), "q": text, "a": reply})
             if saved:
                 words_added.append({"id": saved["id"], "word": saved["word"],
                                     "meaning_zh": str(nw.get("meaning_zh") or "")[:300], "new": saved["new"]})
@@ -1760,9 +1802,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 now = int(time.time())
                 with db() as c:
                     rows = [dict(r) for r in c.execute(
-                        "SELECT id, word, meaning_en, meaning_zh, example, context, source, created, date, reviews, "
-                        "correct, streak, due, last_reviewed FROM vocab_words WHERE user_id=? ORDER BY created DESC",
+                        "SELECT id, word, meaning_en, meaning_zh, example, context, exchanges, source, created, date, "
+                        "reviews, correct, streak, due, last_reviewed FROM vocab_words WHERE user_id=? ORDER BY created DESC",
                         (user["id"],)).fetchall()]
+                backfill_word_exchanges(user["id"], rows)
+                for r in rows:
+                    try:
+                        r["exchanges"] = json.loads(r["exchanges"]) if r["exchanges"] else []
+                    except Exception:
+                        r["exchanges"] = []
                 return self.send_json({"items": rows, "due": sum(1 for r in rows if (r["due"] or 0) <= now), "now": now})
             if p == "/api/words/quiz":
                 user = self.auth()
@@ -1773,7 +1821,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     n = max(1, min(30, int((q.get("n") or ["10"])[0])))
                 except ValueError:
                     n = 10
-                return self.send_json({"items": pick_quiz_words(user["id"], n)})
+                rows = pick_quiz_words(user["id"], n)
+                backfill_word_exchanges(user["id"], rows)
+                for r in rows:
+                    try:
+                        r["exchanges"] = json.loads(r["exchanges"]) if r.get("exchanges") else []
+                    except Exception:
+                        r["exchanges"] = []
+                return self.send_json({"items": rows})
             if p == "/api/vocab/history":
                 user = self.auth()
                 if not user:
