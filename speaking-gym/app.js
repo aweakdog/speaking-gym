@@ -688,6 +688,7 @@ async function renderChat() {
           <p class="desc">不限时的自由聊天，不计入每日打卡。Buddy 有长期记忆——你们聊过的事、你的名字和近况它都记得，隔几天回来接着聊也没问题。</p>
         </div>
         <div class="chat-head-right">
+          <label class="rate-label hf-label"><input type="checkbox" id="autoSpeak"> 自动朗读</label>
           <label class="rate-label hf-label"><input type="checkbox" id="handsFree"> 免提连聊</label>
           <label class="rate-label">纠错力度
             <select id="fixLevel">
@@ -737,6 +738,20 @@ async function renderChat() {
       const hint = $("#chatHint");
       if (hint) hint.textContent = "纠错力度已切换为「" + names[v] + "」，下一条消息开始生效。";
     } catch (e) { alert("设置失败：" + e.message); }
+  };
+
+  /* 自动朗读开关：关掉即纯文字沟通，每条回复右下角的「朗读」按钮仍可按需听 */
+  let autoSpeak = load("sg_autospeak", true);
+  const asBox = $("#autoSpeak");
+  asBox.checked = autoSpeak;
+  asBox.onchange = () => {
+    autoSpeak = asBox.checked;
+    save("sg_autospeak", autoSpeak);
+    if (!autoSpeak) { speechSynthesis.cancel(); if (ttsAudio) { try { ttsAudio.pause(); } catch (_) {} ttsAudio = null; } }
+    const hint = $("#chatHint");
+    if (hint) hint.textContent = autoSpeak
+      ? "自动朗读已开启：Buddy 的每条回复会读出来。"
+      : "自动朗读已关闭：纯文字聊天，想听某一条时点它右下角的「朗读」。";
   };
 
   /* 免提连聊开关 */
@@ -841,7 +856,7 @@ async function renderChat() {
       return;
     }
     chatBusy = false;
-    await speak(reply);
+    if (autoSpeak) await speak(reply);
     if (handsFree && $("#chatBox") && !talking && !chatBusy) startTalk();
   }
 
