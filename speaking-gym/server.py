@@ -136,6 +136,8 @@ def init_db():
             c.execute("ALTER TABLE chat_messages ADD COLUMN photo_id INTEGER")
         if "words_json" not in ccols:
             c.execute("ALTER TABLE chat_messages ADD COLUMN words_json TEXT")
+        if "effects_json" not in ccols:  # 这一轮对话的副作用（新收录的词、提醒、记忆备注），撤回时据此撤销
+            c.execute("ALTER TABLE chat_messages ADD COLUMN effects_json TEXT")
         if c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vocab_words'").fetchone():
             wcols = [r[1] for r in c.execute("PRAGMA table_info(vocab_words)")]
             if "exchanges" not in wcols:
@@ -1165,14 +1167,15 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
     fix = data.get("fix") or None
 
     # 备忘：明确要求记住的内容直接追加进长期记忆笔记
-    memory_added = None
+    memory_added = memory_line = None
     mem_add = data.get("memory_add")
     if isinstance(mem_add, str) and mem_add.strip():
         memory_added = mem_add.strip()[:300]
+        memory_line = "* [%s] %s" % (date.today().isoformat(), memory_added)
         with db() as c:
             row_m = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
             base_s = ((row_m["summary"] if row_m else "") or "").rstrip()
-            new_s = (base_s + ("\n" if base_s else "") + "* [%s] %s" % (date.today().isoformat(), memory_added))[:8000]
+            new_s = (base_s + ("\n" if base_s else "") + memory_line)[:8000]
             if row_m:
                 c.execute("UPDATE chat_memory SET summary=?, updated=? WHERE user_id=?",
                           (new_s, int(time.time()), uid))
@@ -1222,14 +1225,16 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             sys.stderr.write("word fallback extracted: %s\n" % ([w.get("word") for w in raw_words] or "nothing"))
         except Exception as e:
             sys.stderr.write("word extract failed: %s\n" % e)
+    new_ids, ex_ids, ex_ts = [], [], int(time.time())  # 同一轮的学习记录共用一个时间戳，撤回时按它摘掉
     for nw in raw_words[:6]:
         if not isinstance(nw, dict) or not clean_word(nw.get("word")):
             continue
         try:
             saved = upsert_word(uid, nw.get("word"), nw.get("meaning_en"), nw.get("meaning_zh"), nw.get("example"),
                                 context=text[:300], source="chat",
-                                exchange={"ts": int(time.time()), "q": text, "a": reply})
+                                exchange={"ts": ex_ts, "q": text, "a": reply})
             if saved:
+                (new_ids if saved["new"] else ex_ids).append(saved["id"])
                 words_added.append({"id": saved["id"], "word": saved["word"],
                                     "meaning_zh": str(nw.get("meaning_zh") or "")[:300], "new": saved["new"]})
                 words_for_history.append({k: str(nw.get(k) or "")[:300] for k in ("word", "meaning_en", "meaning_zh", "example")})
@@ -1246,17 +1251,22 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
             fix = data2.get("fix") or None
         except Exception as e:
             sys.stderr.write("strict check failed: %s\n" % e)
+    effects = {k: v for k, v in (("new_words", new_ids), ("ex_words", ex_ids), ("reminder", (reminder_set or {}).get("id")),
+                                 ("memory", memory_line)) if v}
+    if new_ids or ex_ids:
+        effects["ex_ts"] = ex_ts
     now = int(time.time() * 1000)
     with db() as c:
-        c.execute(
+        cur_u = c.execute(
             "INSERT INTO chat_messages (user_id, ts, role, content, channel, typed_note, photo_id) "
             "VALUES (?,?,?,?,?,?,?)",
             (uid, now, "user", text, channel, typed_note, photo_id),
         )
-        c.execute(
-            "INSERT INTO chat_messages (user_id, ts, role, content, fix_json, words_json) VALUES (?,?,?,?,?,?)",
+        cur_a = c.execute(
+            "INSERT INTO chat_messages (user_id, ts, role, content, fix_json, words_json, effects_json) VALUES (?,?,?,?,?,?,?)",
             (uid, now + 1, "assistant", reply, json.dumps(fix, ensure_ascii=False) if fix else None,
-             json.dumps(words_for_history, ensure_ascii=False) if words_for_history else None),
+             json.dumps(words_for_history, ensure_ascii=False) if words_for_history else None,
+             json.dumps(effects, ensure_ascii=False) if effects else None),
         )
         if photo_id:
             c.execute("UPDATE photos SET caption=? WHERE id=? AND user_id=?", (text[:300], int(photo_id), uid))
@@ -1264,7 +1274,48 @@ def chat_turn(uid, text, channel="text", typed_note=None, photo_id=None):
         threading.Thread(target=tag_photo, args=(int(photo_id), text, photo_desc, reply), daemon=True).start()
     threading.Thread(target=maybe_summarize, args=(uid,), daemon=True).start()
     return {"reply": reply, "fix": fix, "photo_desc": photo_desc or None,
-            "memory_added": memory_added, "reminder_set": reminder_set, "words_added": words_added}
+            "memory_added": memory_added, "reminder_set": reminder_set, "words_added": words_added,
+            "user_msg_id": cur_u.lastrowid, "ai_msg_id": cur_a.lastrowid}
+
+
+def recall_turn(uid, msg_id):
+    """撤回最近一轮：删掉这条消息和 Buddy 的回复，并撤销这一轮的副作用——
+    新收录且还没复习过的词删掉（复习过的保留，只摘掉这轮的学习记录）、已有词摘掉这轮追加的学习记录、
+    这轮设的提醒停用、这轮追加的记忆备注删掉。只允许撤回最后一条，免得把中间的上下文挖空。"""
+    with db() as c:
+        u = c.execute("SELECT * FROM chat_messages WHERE id=? AND user_id=? AND role='user'", (msg_id, uid)).fetchone()
+        if not u:
+            return None, "消息不存在或已撤回"
+        if c.execute("SELECT MAX(id) FROM chat_messages WHERE user_id=? AND role='user'", (uid,)).fetchone()[0] != msg_id:
+            return None, "只能撤回最后一条"
+        a = c.execute("SELECT * FROM chat_messages WHERE user_id=? AND role='assistant' AND id>? AND ts=? ORDER BY id LIMIT 1",
+                      (uid, msg_id, (u["ts"] or 0) + 1)).fetchone()
+        try:
+            fx = json.loads(a["effects_json"]) if a and a["effects_json"] else {}
+        except Exception:
+            fx = {}
+        strip_ex = list(fx.get("ex_words") or [])
+        for wid in fx.get("new_words") or []:
+            if not c.execute("DELETE FROM vocab_words WHERE id=? AND user_id=? AND reviews=0", (wid, uid)).rowcount:
+                strip_ex.append(wid)
+        for wid in strip_ex:
+            row = c.execute("SELECT exchanges FROM vocab_words WHERE id=? AND user_id=?", (wid, uid)).fetchone()
+            try:
+                items = [i for i in json.loads(row["exchanges"]) if i.get("ts") != fx.get("ex_ts")] if row and row["exchanges"] else None
+            except Exception:
+                continue
+            if items is not None:
+                c.execute("UPDATE vocab_words SET exchanges=? WHERE id=?", (json.dumps(items, ensure_ascii=False) if items else None, wid))
+        if fx.get("reminder"):
+            c.execute("UPDATE reminders SET active=0 WHERE id=? AND user_id=?", (fx["reminder"], uid))
+        if fx.get("memory"):
+            m = c.execute("SELECT summary FROM chat_memory WHERE user_id=?", (uid,)).fetchone()
+            if m and m["summary"] and fx["memory"] in m["summary"]:
+                c.execute("UPDATE chat_memory SET summary=? WHERE user_id=?",
+                          (m["summary"].replace("\n" + fx["memory"], "").replace(fx["memory"], "").strip(), uid))
+        ids = [msg_id] + ([a["id"]] if a else [])
+        c.execute("DELETE FROM chat_messages WHERE user_id=? AND id IN (%s)" % ",".join("?" * len(ids)), (uid, *ids))
+    return {"deleted": ids, "text": u["content"], "photo_id": u["photo_id"]}, None
 
 
 def check_password(user, pw):
@@ -1687,6 +1738,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.api_chat_send()
             if p == "/api/chat/voice":
                 return self.api_chat_voice()
+            if p == "/api/chat/recall":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                try:
+                    mid = int(self.body_json().get("id"))
+                except (TypeError, ValueError):
+                    return self.fail("bad id")
+                out, err = recall_turn(user["id"], mid)
+                return self.send_json(out) if out else self.fail(err, 409)
             if p == "/api/photos":
                 return self.api_photo_upload()
             if p == "/api/photos/organize":

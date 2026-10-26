@@ -651,6 +651,8 @@ document.addEventListener("click", (e) => {
 
 /* ============ Tab：AI 对话（带长期记忆的陪聊） ============ */
 let chatBusy = false;
+const chatDraftKey = () => "sg_chat_draft_" + (AUTH.user ? AUTH.user.username : "");
+const chatPhotoKey = () => "sg_chat_photo_" + (AUTH.user ? AUTH.user.username : "");
 
 async function downscaleImage(file, maxDim = 1600) {
   try {
@@ -666,14 +668,16 @@ async function downscaleImage(file, maxDim = 1600) {
   } catch (_) { return file; }
 }
 
-function chatBubble(role, content, fix, typedNote, photoSrc) {
+/* meta.id：服务器上的消息 id（撤回用）；meta.photoId：随消息发的图片 */
+function chatBubble(role, content, fix, typedNote, photoSrc, meta = {}) {
+  const attrs = (meta.id ? ` data-id="${meta.id}"` : "") + (meta.photoId ? ` data-photo="${meta.photoId}"` : "");
   if (role === "user") return `
-    <div class="msg user">
+    <div class="msg user"${attrs}>
       <div class="bubble">${photoSrc ? `<img class="bubble-photo" src="${photoSrc}" alt="photo">` : ""}${esc(content)}</div>
       ${typedNote ? `<div class="typed-note">键入补充：${esc(typedNote)}</div>` : ""}
     </div>`;
   return `
-    <div class="msg ai">
+    <div class="msg ai"${attrs}>
       <div class="bubble">${esc(content)}<button class="play-mini msg-play" data-text="${encodeURIComponent(content)}">朗读</button></div>
       ${fix ? `<div class="chat-fix"><span class="cf-orig">${esc(fix.original || "")}</span> → <span class="cf-better">${esc(fix.better || "")}</span>${fix.why_zh ? `<div class="cf-why">${esc(fix.why_zh)}</div>` : ""}</div>` : ""}
     </div>`;
@@ -714,7 +718,17 @@ async function renderChat() {
     </div>`;
   const box = () => $("#chatBox");
   const scrollDown = () => { const b = box(); if (b) b.scrollTop = b.scrollHeight; };
-  const append = (html) => { const b = box(); if (!b) return; b.insertAdjacentHTML("beforeend", html); scrollDown(); };
+  const append = (html) => { const b = box(); if (!b) return null; b.insertAdjacentHTML("beforeend", html); scrollDown(); return b.lastElementChild; };
+  const toEl = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+  const hint = (t) => { const h = $("#chatHint"); if (h) h.textContent = t; };
+
+  /* 草稿：输入框随打随存（按账号），切到别的页面、App 被系统回收后再回来都还在 */
+  const input = $("#chatText");
+  const saveDraft = () => { if (input.value) localStorage.setItem(chatDraftKey(), input.value); else localStorage.removeItem(chatDraftKey()); };
+  const setInput = (v) => { input.value = v; saveDraft(); };
+  const restoreText = (t) => { if (!t) return; setInput(input.value.trim() ? t + " " + input.value : t); input.focus(); };
+  input.value = localStorage.getItem(chatDraftKey()) || "";
+  input.addEventListener("input", saveDraft);
 
   $("#chatClear").onclick = async () => {
     const pw = prompt(
@@ -768,7 +782,7 @@ async function renderChat() {
       : "免提连聊已关闭。";
   };
 
-  /* 图片暂存 */
+  /* 图片暂存（也算草稿：刷新 / 切页面回来还在） */
   let pendingPhoto = null;
   const renderStage = () => {
     const s = $("#photoStage");
@@ -780,10 +794,18 @@ async function renderChat() {
     const r = $("#stageRemove");
     if (r) r.onclick = async () => {
       try { await api(`/api/photos/${pendingPhoto.id}`, { method: "DELETE" }); } catch (_) {}
-      pendingPhoto = null;
-      renderStage();
+      setPhoto(null);
     };
   };
+  const setPhoto = (p) => {
+    pendingPhoto = p;
+    if (p) save(chatPhotoKey(), { id: p.id }); else localStorage.removeItem(chatPhotoKey());
+    renderStage();
+  };
+  const photoUrl = (id) => `/api/photo/${id}?t=${encodeURIComponent(AUTH.token)}`;
+  const restorePhoto = (photo) => { if (photo && photo.id && !pendingPhoto) setPhoto({ id: photo.id, url: photo.url || photoUrl(photo.id) }); };
+  const savedPhoto = load(chatPhotoKey(), null);
+  if (savedPhoto) setPhoto({ id: savedPhoto.id, url: photoUrl(savedPhoto.id) });
   $("#btnPhoto").onclick = () => $("#photoFile").click();
   $("#photoFile").onchange = async (e) => {
     const f = e.target.files[0];
@@ -794,12 +816,52 @@ async function renderChat() {
     const blob = await downscaleImage(f);
     try {
       const resp = await api("/api/photos", { method: "POST", blob, mime: blob.type || "image/jpeg" });
-      pendingPhoto = { id: resp.id, url: URL.createObjectURL(blob) };
-      renderStage();
+      setPhoto({ id: resp.id, url: URL.createObjectURL(blob) });
       if (hint) hint.textContent = "图片已就绪：现在说话或打字描述它，会随下一条消息一起发给 Buddy 并存入图库。";
     } catch (err) {
       if (hint) hint.textContent = "图片上传失败：" + err.message;
     }
+  };
+
+  /* 撤回：只有最后一条「我」的消息下面有「撤回」。删掉它和 Buddy 的回复（服务端顺带撤销这一轮收的词、设的提醒、记的备注），
+     文字放回输入框、图片放回暂存区，改好再发。Buddy 还没回就撤回：回复到了直接删掉，不显示也不朗读 */
+  const removeTurn = (el, deleted = []) => {  // 这条消息 + 后面属于这一轮的回复和提示；服务器另存的消息（如提醒推送）不动
+    for (let n = el.nextElementSibling; n && !n.classList.contains("user");) {
+      const next = n.nextElementSibling;
+      if (!n.dataset.id || deleted.includes(+n.dataset.id)) n.remove();
+      n = next;
+    }
+    el.remove();
+  };
+  const recall = async (el) => {
+    if (el._recalled) return;
+    el._recalled = true;
+    const img = el.querySelector(".bubble-photo");
+    const photo = el.dataset.photo ? { id: +el.dataset.photo, url: img && img.src } : null;
+    if (el._pending) {
+      removeTurn(el);
+      if (!el._voice) { restoreText(el._text); restorePhoto(photo); }
+      hint(el._voice ? "已撤回：识别出的文字一到就放回输入框。" : "已撤回，内容放回输入框了；Buddy 的回复到了会直接丢掉。");
+      return refreshRecall();
+    }
+    try {
+      const r = await api("/api/chat/recall", { json: { id: +el.dataset.id } });
+      removeTurn(el, r.deleted);
+      restoreText(r.text);
+      restorePhoto(r.photo_id ? { id: r.photo_id, url: img && img.src } : null);
+      hint("已撤回，内容放回输入框了，改好再发。");
+    } catch (e) { el._recalled = false; alert("撤回失败：" + e.message); }
+    refreshRecall();
+  };
+  const refreshRecall = () => {
+    const b = box();
+    if (!b) return;
+    b.querySelectorAll(".recall-btn").forEach((x) => x.remove());
+    const users = b.querySelectorAll(".msg.user");
+    const el = users[users.length - 1];
+    if (!el || !(el.dataset.id || el._pending)) return;
+    el.insertAdjacentHTML("beforeend", `<button class="link-btn recall-btn">撤回</button>`);
+    el.querySelector(".recall-btn").onclick = () => recall(el);
   };
 
   try {
@@ -809,32 +871,43 @@ async function renderChat() {
       ? h.items.map((m) => {
           let fix = null;
           try { fix = m.fix_json ? JSON.parse(m.fix_json) : null; } catch (_) {}
-          const src = m.photo_id ? `/api/photo/${m.photo_id}?t=${encodeURIComponent(AUTH.token)}` : null;
-          return chatBubble(m.role, m.content, fix, m.typed_note, src);
+          return chatBubble(m.role, m.content, fix, m.typed_note, m.photo_id ? photoUrl(m.photo_id) : null, { id: m.id, photoId: m.photo_id });
         }).join("")
       : chatBubble("ai", "Hey! I'm Buddy, your English chat partner. Tell me about your day — or anything on your mind. What's up?", null);
+    refreshRecall();
     scrollDown();
   } catch (e) {
     if (box()) box().innerHTML = `<p class="desc">历史加载失败：${esc(e.message)}</p>`;
   }
 
-  async function handleReply(promise, placeholderId, note) {
+  /* turn：{ el: 我的消息（语音是「识别中」占位）, ph: 「Buddy 正在输入」占位（文字消息才有）, text, note, photo, voice } */
+  async function handleReply(promise, turn) {
+    const { el } = turn;
     let reply = null;
     try {
       const resp = await promise;
-      const ph = document.getElementById(placeholderId);
-      if (resp.user_text === "") {
-        if (ph) ph.remove();
-        const hint = $("#chatHint");
-        if (hint) hint.textContent = "没有听清，请再试一次（离麦克风近一点）。";
-        if (note) { const input = $("#chatText"); if (input && !input.value) input.value = note; }
+      if (el._recalled) {  // 回复到之前已经撤回：这一轮刚在服务器存下，马上删掉，不显示也不朗读
+        if (resp.user_msg_id) await api("/api/chat/recall", { json: { id: resp.user_msg_id } }).catch(() => {});
+        if (turn.voice) { restoreText(resp.user_text); restorePhoto(turn.photo); }
         chatBusy = false;
+        return;
+      }
+      if (resp.user_text === "") {
+        el.remove();
+        hint("没有听清，请再试一次（离麦克风近一点）。");
+        restoreText(turn.note);
+        restorePhoto(turn.photo);
+        chatBusy = false;
+        refreshRecall();
         if (handsFree && $("#chatBox")) setTimeout(() => { if (!talking && !chatBusy) startTalk(); }, 600);
         return;
       }
-      if (resp.user_text && ph) ph.outerHTML = chatBubble("user", resp.user_text, null, resp.typed_note || note, resp._photoUrl);
-      else if (ph) ph.remove();
-      append(chatBubble("ai", resp.reply, resp.fix));
+      el._pending = false;
+      if (turn.voice) el.replaceWith(toEl(chatBubble("user", resp.user_text, null, resp.typed_note || turn.note, turn.photo && turn.photo.url,
+        { id: resp.user_msg_id, photoId: turn.photo && turn.photo.id })));
+      else el.dataset.id = resp.user_msg_id;
+      if (turn.ph) turn.ph.remove();
+      append(chatBubble("ai", resp.reply, resp.fix, null, null, { id: resp.ai_msg_id }));
       if (resp.memory_added) append(`<div class="msg ai"><div class="chat-note">已记入长期记忆：${esc(resp.memory_added)}</div></div>`);
       if (resp.words_added && resp.words_added.length) {
         const list = resp.words_added.map((w) => `<b>${esc(w.word)}</b>${w.meaning_zh ? " · " + esc(w.meaning_zh) : ""}${w.new ? "" : "（已有，释义已更新）"}`).join("；");
@@ -850,38 +923,40 @@ async function renderChat() {
       }
       reply = resp.reply;
     } catch (e) {
-      const ph = document.getElementById(placeholderId);
-      if (ph) ph.outerHTML = `<div class="msg ai"><div class="bubble">（${esc(e.message)}）</div></div>`;
-      if (note) { const input = $("#chatText"); if (input && !input.value) input.value = note; }
       chatBusy = false;
+      if (el._recalled) return;  // 已撤回的那条本来就没存上，什么都不用做
+      const err = `<div class="msg ai"><div class="bubble">（${turn.voice ? "" : "发送失败："}${esc(e.message)}${turn.voice ? "" : "——内容已放回输入框"}）</div></div>`;
+      if (turn.voice) el.replaceWith(toEl(err));
+      else { el.remove(); if (turn.ph) turn.ph.replaceWith(toEl(err)); }
+      restoreText(turn.voice ? turn.note : turn.text);
+      restorePhoto(turn.photo);
+      refreshRecall();
       return;
     }
     chatBusy = false;
+    refreshRecall();
     if (autoSpeak) await speak(reply);
     if (handsFree && $("#chatBox") && !talking && !chatBusy) startTalk();
   }
 
   const sendText = () => {
-    if (talking) {
-      const hint = $("#chatHint");
-      if (hint) hint.textContent = "正在录音：输入框里的内容会作为关键词随这段语音一起发送，无需单独发。";
-      return;
-    }
-    const input = $("#chatText");
+    if (talking) return hint("正在录音：输入框里的内容会作为关键词随这段语音一起发送，无需单独发。");
     const text = input.value.trim();
-    if (!text || chatBusy) return;
+    if (!text) return;
+    if (chatBusy) return hint("Buddy 还在处理上一条，等它回完再发。");
     chatBusy = true;
-    input.value = "";
+    setInput("");
     const photo = pendingPhoto;
-    pendingPhoto = null;
-    renderStage();
-    append(chatBubble("user", text, null, null, photo ? photo.url : null));
-    const pid = "ph" + Date.now();
-    append(`<div class="msg ai" id="${pid}"><div class="bubble thinking">Buddy 正在输入…</div></div>`);
-    handleReply(api("/api/chat/send", { json: { text, photo_id: photo ? photo.id : null } }), pid);
+    setPhoto(null);
+    const el = append(chatBubble("user", text, null, null, photo ? photo.url : null, { photoId: photo && photo.id }));
+    Object.assign(el, { _pending: true, _text: text });
+    const ph = append(`<div class="msg ai"><div class="bubble thinking">Buddy 正在输入…</div></div>`);
+    refreshRecall();
+    handleReply(api("/api/chat/send", { json: { text, photo_id: photo ? photo.id : null } }), { el, ph, text, photo });
   };
   $("#btnSend").onclick = sendText;
-  $("#chatText").addEventListener("keydown", (e) => { if (e.key === "Enter") sendText(); });
+  // 输入法选词 / 上屏按的回车（isComposing，Safari 上是 keyCode 229）不算发送，免得打中文时误发
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) sendText(); });
 
   let talking = false;
   let finishTalk = null;
@@ -907,21 +982,18 @@ async function renderChat() {
       if (hintEl()) hintEl().textContent = handsFree ? "识别中……（免提模式：回复播完后会自动继续听）" : "语音：点「按一下说话」开始，说完停顿 3.5 秒自动发送。";
       if (!blob) return;
       chatBusy = true;
-      const noteInput = $("#chatText");
-      const note = noteInput ? noteInput.value.trim() : "";
-      if (noteInput) noteInput.value = "";
+      const note = input.value.trim();
+      setInput("");
       const photo = pendingPhoto;
-      pendingPhoto = null;
-      renderStage();
-      const pid = "ph" + Date.now();
-      append(`<div class="msg user" id="${pid}"><div class="bubble thinking">（识别中…）</div></div>`);
+      setPhoto(null);
+      const el = append(`<div class="msg user"><div class="bubble thinking">（识别中…）</div></div>`);
+      Object.assign(el, { _pending: true, _voice: true });
+      refreshRecall();
       const params = new URLSearchParams();
       if (note) params.set("note", note);
       if (photo) params.set("photo_id", photo.id);
       const qs = params.toString();
-      const p = api("/api/chat/voice" + (qs ? "?" + qs : ""), { method: "POST", blob, mime: blob.type });
-      const wrapped = p.then((resp) => { if (photo) resp._photoUrl = photo.url; return resp; });
-      handleReply(wrapped, pid, note);
+      handleReply(api("/api/chat/voice" + (qs ? "?" + qs : ""), { method: "POST", blob, mime: blob.type }), { el, note, photo, voice: true });
     };
     startVad(recorder.stream, finishTalk, {
       silenceMs: 3500,
@@ -1104,7 +1176,11 @@ function askBuddyAbout(word) {
   let tries = 0;
   const fill = () => {
     const input = $("#chatText");
-    if (input) { input.value = `Can you explain "${word}" — what it means, how to use it, and give me two natural examples?`; input.focus(); }
+    if (input) {
+      input.value = `Can you explain "${word}" — what it means, how to use it, and give me two natural examples?`;
+      input.dispatchEvent(new Event("input"));  // 同步存进草稿
+      input.focus();
+    }
     else if (tries++ < 20) setTimeout(fill, 100);
   };
   fill();
