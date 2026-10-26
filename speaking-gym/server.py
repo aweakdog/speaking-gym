@@ -114,6 +114,8 @@ def init_db():
         ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
         if "chat_fix_level" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN chat_fix_level TEXT DEFAULT 'standard'")
+        if "freq_cursor" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN freq_cursor INTEGER DEFAULT 0")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -580,21 +582,26 @@ DEFINE_WORD_SYSTEM = (
 )
 
 
-# ---------- 话题库（部署时由 data.js 导出 topics.json，Buddy 每回合抽样） ----------
-_TOPICS_CACHE = {"mtime": 0, "data": None}
+# ---------- 随代码部署的数据文件（topics.json / freq_words.json）：按修改时间缓存，更新后自动重载 ----------
+_JSON_CACHE = {}
 
 
-def load_topics():
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "topics.json")
+def cached_json(name):
+    p = os.path.join(BASE, name)
     try:
         mt = os.path.getmtime(p)
-        if _TOPICS_CACHE["data"] is None or mt != _TOPICS_CACHE["mtime"]:
+        hit = _JSON_CACHE.get(name)
+        if not hit or hit[0] != mt:
             with open(p, encoding="utf-8") as f:
-                _TOPICS_CACHE["data"] = json.load(f).get("categories") or []
-            _TOPICS_CACHE["mtime"] = mt
-    except OSError:
-        return []
-    return _TOPICS_CACHE["data"]
+                hit = _JSON_CACHE[name] = (mt, json.load(f))
+        return hit[1]
+    except (OSError, ValueError):
+        return None
+
+
+# ---------- 话题库（部署时由 data.js 导出 topics.json，Buddy 每回合抽样） ----------
+def load_topics():
+    return (cached_json("topics.json") or {}).get("categories") or []
 
 
 def topic_menu_block():
@@ -767,6 +774,58 @@ def word_book_block(uid):
             "SELECT word, meaning_zh FROM vocab_words WHERE user_id=? ORDER BY created DESC LIMIT 12", (uid,)).fetchall()
     items = "; ".join("%s (%s)" % (r["word"], (r["meaning_zh"] or "")[:20]) for r in recent)
     return "WORD BOOK: %d saved words, %d due for review. Most recent: %s" % (total, due, items)
+
+
+# ---------- 高频词积累（COCA 词频表从高到低过一遍：不会 / 认错了的词进单词本） ----------
+def freq_words():
+    """[[rank, word, phonetic, zh], ...]，由 tools/build_freq_words.py 从 ECDICT 生成。"""
+    return (cached_json("freq_words.json") or {}).get("words") or []
+
+
+def freq_state(uid, n=0):
+    """进度 + 从游标起的下 n 个词（单词本里已有的词直接跳过）。"""
+    words = freq_words()
+    with db() as c:
+        cursor = min(c.execute("SELECT freq_cursor FROM users WHERE id=?", (uid,)).fetchone()[0] or 0, len(words))
+        added = c.execute("SELECT COUNT(*) FROM vocab_words WHERE user_id=? AND source='freq'", (uid,)).fetchone()[0]
+        have = {r[0] for r in c.execute("SELECT word_key FROM vocab_words WHERE user_id=?", (uid,))} if n else set()
+    items = []
+    for i in range(cursor, len(words)):
+        if len(items) >= n:
+            break
+        rank, word, phonetic, zh = words[i]
+        if word_key(word) not in have:
+            items.append({"idx": i, "rank": rank, "word": word, "phonetic": phonetic, "zh": zh})
+    return {"total": len(words), "cursor": cursor, "added": added, "items": items}
+
+
+def freq_answer(uid, idx, result):
+    words = freq_words()
+    if not 0 <= idx < len(words):
+        return None
+    rank, word, _phonetic, zh = words[idx]
+    with db() as c:
+        c.execute("UPDATE users SET freq_cursor=MAX(COALESCE(freq_cursor, 0), ?) WHERE id=?", (idx + 1, uid))
+    saved = None
+    if result != "known":
+        saved = upsert_word(uid, word, meaning_zh=zh, source="freq", context="高频词第 %d 个（COCA #%d）· %s" % (
+            idx + 1, rank, "不会" if result == "unknown" else "认错了"))
+        if saved and saved["new"] and DEEPSEEK_KEY:
+            threading.Thread(target=enrich_word, args=(saved["id"], word), daemon=True).start()
+    return {"ok": True, "saved": saved}
+
+
+def enrich_word(wid, word):
+    """高频词入本时只有词典的中文释义：后台让 AI 补上英文释义和例句（复习翻卡、拼写填空都用得上）。"""
+    try:
+        info = define_word(word)
+        if info:
+            with db() as c:
+                c.execute("UPDATE vocab_words SET meaning_en=COALESCE(NULLIF(meaning_en, ''), ?), "
+                          "example=COALESCE(NULLIF(example, ''), ?) WHERE id=?",
+                          (info["meaning_en"], info["example"], wid))
+    except Exception as e:
+        sys.stderr.write("enrich word %s failed: %s\n" % (wid, e))
 
 
 def tag_user_content(content, channel, typed_note, photo_desc=None):
@@ -1663,6 +1722,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self.fail("bad result")
                 out = apply_review(user["id"], int(m.group(1)), result)
                 return self.send_json(out) if out else self.fail("not found", 404)
+            if p == "/api/freq/answer":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                d = self.body_json()
+                if d.get("result") not in ("known", "unknown", "wrong"):
+                    return self.fail("bad result")
+                try:
+                    idx = int(d.get("idx"))
+                except (TypeError, ValueError):
+                    return self.fail("bad idx")
+                out = freq_answer(user["id"], idx, d["result"])
+                return self.send_json(out) if out else self.fail("not found", 404)
+            if p == "/api/freq/cursor":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                try:
+                    cursor = max(0, min(len(freq_words()), int(self.body_json().get("cursor"))))
+                except (TypeError, ValueError):
+                    return self.fail("bad cursor")
+                with db() as c:
+                    c.execute("UPDATE users SET freq_cursor=? WHERE id=?", (cursor, user["id"]))
+                return self.send_json(freq_state(user["id"]))
             if p == "/api/vocab":
                 user = self.auth()
                 if not user:
@@ -1890,6 +1973,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     except Exception:
                         r["exchanges"] = []
                 return self.send_json({"items": rows})
+            if p == "/api/freq":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    n = max(0, min(50, int((q.get("n") or ["0"])[0])))
+                except ValueError:
+                    n = 0
+                return self.send_json(freq_state(user["id"], n))
             if p == "/api/vocab/history":
                 user = self.auth()
                 if not user:

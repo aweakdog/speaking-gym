@@ -11,6 +11,8 @@
   - 录音自动上传，服务器端 Whisper 精确转写
   - DeepSeek 按评分量表打分（流利度/词汇/语法/内容）+ 逐句纠错 + 口语范本
   - 多用户账号、评分曲线、历史存档、可选公开的录音广场
+  - 单词本：对话中问到的生词自动收录 + 高频词积累（按 COCA 词频从高到低过词，不会/认错的自动入本）+ 间隔复习
+    - 高频词表 `speaking-gym/freq_words.json` 由 `tools/build_freq_words.py` 从 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT License）生成，许可声明随文件附带
 
 ## 部署
 
