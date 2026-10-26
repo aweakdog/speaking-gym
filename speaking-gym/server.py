@@ -782,15 +782,15 @@ def freq_words():
     return (cached_json("freq_words.json") or {}).get("words") or []
 
 
-def freq_state(uid, n=0):
-    """进度 + 从游标起的下 n 个词（单词本里已有的词直接跳过）。"""
+def freq_state(uid, n=0, start=0):
+    """进度 + 从游标（或更靠后的 start：无尽模式从前端缓冲末尾续取）起的下 n 个词，单词本里已有的词直接跳过。"""
     words = freq_words()
     with db() as c:
         cursor = min(c.execute("SELECT freq_cursor FROM users WHERE id=?", (uid,)).fetchone()[0] or 0, len(words))
         added = c.execute("SELECT COUNT(*) FROM vocab_words WHERE user_id=? AND source='freq'", (uid,)).fetchone()[0]
         have = {r[0] for r in c.execute("SELECT word_key FROM vocab_words WHERE user_id=?", (uid,))} if n else set()
     items = []
-    for i in range(cursor, len(words)):
+    for i in range(max(cursor, start), len(words)):
         if len(items) >= n:
             break
         rank, word, phonetic, zh = words[i]
@@ -1980,9 +1980,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 try:
                     n = max(0, min(50, int((q.get("n") or ["0"])[0])))
+                    start = max(0, int((q.get("from") or ["0"])[0]))
                 except ValueError:
-                    n = 0
-                return self.send_json(freq_state(user["id"], n))
+                    n, start = 0, 0
+                return self.send_json(freq_state(user["id"], n, start))
             if p == "/api/vocab/history":
                 user = self.auth()
                 if not user:

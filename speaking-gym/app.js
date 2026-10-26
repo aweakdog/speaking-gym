@@ -1056,14 +1056,15 @@ async function renderWords(root) {
   $("#btnQuizFlash").onclick = () => startWordQuiz("flash");
   $("#btnQuizRecall").onclick = () => startWordQuiz("recall");
   if (fq && fq.total) {
-    $("#btnFreqStart").onclick = () => startFreq();
+    $("#btnFreqEndless").onclick = () => startFreq(true);
+    $("#btnFreqRound").onclick = () => startFreq(false);
     const jump = async () => {
       const pos = parseInt($("#freqPos").value, 10);
       if (!(pos >= 1)) return;
-      const startBtn = $("#btnFreqStart");
-      startBtn.disabled = true;  // 起点保存完再开始，免得这一轮还从旧位置抽
+      const btns = [$("#btnFreqEndless"), $("#btnFreqRound")].filter((b) => !b.disabled);
+      btns.forEach((b) => { b.disabled = true; });  // 起点保存完再开始，免得还从旧位置抽
       try { await api("/api/freq/cursor", { json: { cursor: pos - 1 } }); renderWords(root); }
-      catch (e) { alert("设置失败：" + e.message); startBtn.disabled = false; }
+      catch (e) { alert("设置失败：" + e.message); btns.forEach((b) => { b.disabled = false; }); }
     };
     $("#btnFreqJump").onclick = jump;
     $("#freqPos").onkeydown = (e) => { if (e.key === "Enter") jump(); };
@@ -1246,11 +1247,12 @@ function freqPanelHtml(fq) {
   return `
     <div class="freq-panel">
       <b>高频词积累</b>
-      <p class="muted-sm">按当代美语语料库（COCA）词频，从最常用的词往下过：认识的直接跳过，不会或认错了的自动加入单词本。开头的词大多认识的话，把起点往后调，直接从生词变多的地方开始。</p>
+      <p class="muted-sm">按当代美语语料库（COCA）词频，从最常用的词往下过：认识的直接跳过，不会或认错了的自动加入单词本。「无尽模式」一张接一张不停，随时点「结束」看这次的收获；开头的词大多认识的话，可以把起点往后调。</p>
       <div class="freq-bar"><div style="width:${(100 * fq.cursor / fq.total).toFixed(1)}%"></div></div>
       <div class="muted-sm">已过 ${fq.cursor.toLocaleString()} / ${fq.total.toLocaleString()} 个 · 从这里加入单词本 ${fq.added} 个</div>
       <div class="freq-actions">
-        <button class="btn" id="btnFreqStart" ${done ? "disabled" : ""}>${done ? "整个词表已过完" : `${fq.cursor ? "继续" : "开始"}积累 · ${FREQ_BATCH} 个`}</button>
+        <button class="btn" id="btnFreqEndless" ${done ? "disabled" : ""}>${done ? "整个词表已过完" : "无尽模式 · 一直往下"}</button>
+        <button class="btn secondary" id="btnFreqRound" ${done ? "disabled" : ""}>来一轮 · ${FREQ_BATCH} 个</button>
         <label class="rate-label">起点：第<input id="freqPos" type="number" min="1" max="${fq.total}" value="${Math.min(fq.cursor + 1, fq.total)}">个</label>
         <button class="link-btn" id="btnFreqJump">设为起点</button>
       </div>
@@ -1263,19 +1265,34 @@ function bindFreqKeys(fn) {
   freqKeyHandler = fn;
   if (fn) document.addEventListener("keydown", fn);
 }
-async function startFreq() {
+async function startFreq(endless) {
   let d;
   try { d = await api(`/api/freq?n=${FREQ_BATCH}`); } catch (e) { alert("加载失败：" + e.message); return; }
   if (!d.items.length) { alert("整个高频词表已经过完了。"); return; }
-  renderFreqCard({ ...d, i: 0, tally: { known: 0, unknown: 0, wrong: 0 }, added: [], savedIds: [], failed: [], pending: [] });
+  renderFreqCard({ ...d, endless, i: 0, tally: { known: 0, unknown: 0, wrong: 0 }, added: [], savedIds: [], failed: [], pending: [] });
+}
+/* 无尽模式：缓冲只剩几个词时，后台从缓冲末尾往后续一批（不等服务端游标追上），一张接一张不停顿 */
+function topUpFreq(fz) {
+  if (fz.loading || fz.exhausted) return;
+  fz.loading = api(`/api/freq?n=${FREQ_BATCH}&from=${fz.items[fz.items.length - 1].idx + 1}`)
+    .then((d) => { fz.total = d.total; if (d.items.length) fz.items.push(...d.items); else fz.exhausted = true; })
+    .catch(() => {})
+    .finally(() => { fz.loading = null; });
 }
 /* 一张卡三种状态：词面（认识 / 不会）→ 认识后翻开核对（对 / 认错了）→ 不会直接翻开并入本（下一个） */
 function renderFreqCard(fz) {
-  if (fz.i >= fz.items.length) return finishFreq(fz);
+  if (fz.endless && fz.items.length - fz.i <= 5) topUpFreq(fz);
+  if (fz.i >= fz.items.length) {
+    if (!fz.loading) return finishFreq(fz);
+    view.innerHTML = `<div class="card" id="freqWait"><p class="desc">加载下一批……</p></div>`;
+    fz.loading.then(() => { if ($("#freqWait")) (fz.i < fz.items.length ? renderFreqCard : finishFreq)(fz); });
+    return;
+  }
   const it = fz.items[fz.i];
+  const pos = `第 ${(it.idx + 1).toLocaleString()} / ${fz.total.toLocaleString()} 个`;
   view.innerHTML = `
     <div class="card" id="freqCard">
-      <span class="step-tag">高频词积累 · 第 ${(it.idx + 1).toLocaleString()} / ${fz.total.toLocaleString()} 个 · 本轮 ${fz.i + 1} / ${fz.items.length}</span>
+      <span class="step-tag">高频词积累 · ${fz.endless ? `无尽模式 · ${pos} · 本次第 ${fz.i + 1} 个，已入本 ${fz.tally.unknown + fz.tally.wrong} 个` : `${pos} · 本轮 ${fz.i + 1} / ${fz.items.length}`}</span>
       <div class="flashcard">
         <div class="flash-word">${esc(it.word)} <button class="link-btn" id="btnSay" style="font-size:22px">🔊</button></div>
         ${it.phonetic ? `<div class="freq-ph">/${esc(it.phonetic)}/</div>` : ""}
@@ -1286,18 +1303,24 @@ function renderFreqCard(fz) {
         </div>
       </div>
       <div style="margin-top:14px" id="freqActions"></div>
-      <div class="muted-sm kbd-tip">键盘：1 或空格 = 认识 / 对 / 下一个，2 = 不会 / 认错了</div>
+      <div class="muted-sm kbd-tip">键盘：1 或空格 = 认识 / 对 / 下一个，2 = 不会 / 认错了，Esc = 结束</div>
     </div>`;
   const card = $("#freqCard"), noteEl = $("#freqNote");
   let keys = {}, stamp = 0;
+  const quit = () => {  // 答过词就看这次的小结，一个没答直接回单词本
+    if (fz.tally.known + fz.tally.unknown + fz.tally.wrong) return finishFreq(fz);
+    bindFreqKeys(null);
+    memSub = "words";
+    renderMemory();
+  };
   const actions = (list) => {
     stamp = Date.now();
     keys = {};
     $("#freqActions").innerHTML = list.map(([label, cls, key], j) => `<button class="btn ${cls}" data-j="${j}">${label} <kbd>${key}</kbd></button>`).join("")
-      + `<button class="btn ghost" id="freqQuit">退出</button>`;
+      + `<button class="btn ghost" id="freqQuit">结束</button>`;
     // 防双击：按钮换完 0.25 秒内的点击不算，免得双击「认识」直接点穿「对，下一个」（键盘长按已由 e.repeat 挡住）
     list.forEach(([, , key, fn], j) => { keys[key] = fn; $(`#freqActions [data-j="${j}"]`).onclick = () => { if (Date.now() - stamp > 250) fn(); }; });
-    $("#freqQuit").onclick = async () => { bindFreqKeys(null); await Promise.allSettled(fz.pending); memSub = "words"; renderMemory(); };
+    $("#freqQuit").onclick = quit;
   };
   const send = (result) => {
     fz.tally[result]++;
@@ -1336,7 +1359,7 @@ function renderFreqCard(fz) {
     if (!card.isConnected) return bindFreqKeys(null);
     const tag = e.target.tagName;
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
-    const fn = keys[e.key === " " || e.key === "Enter" ? (tag === "BUTTON" ? "" : "1") : e.key];
+    const fn = e.key === "Escape" ? quit : keys[e.key === " " || e.key === "Enter" ? (tag === "BUTTON" ? "" : "1") : e.key];
     if (fn) { e.preventDefault(); fn(); }
   });
 }
@@ -1347,12 +1370,14 @@ async function finishFreq(fz) {
   let st = null;
   try { st = await api("/api/freq"); } catch (_) {}
   const { known, unknown, wrong } = fz.tally;
-  const n = fz.items.length;
-  const easy = st && st.cursor < st.total && known >= n * 0.95;
+  const n = known + unknown + wrong;
+  const done = st && st.cursor >= st.total;
+  const easy = st && !done && n >= 10 && known >= n * 0.95;
+  const stalled = fz.endless && !fz.exhausted && fz.i >= fz.items.length;  // 缓冲见底但词表没完：下一批没加载出来
   view.innerHTML = `
     <div class="card">
-      <span class="step-tag">高频词积累 · 本轮完成</span>
-      <h2>过了 ${n} 个词，${fz.savedIds.length} 个加入单词本</h2>
+      <span class="step-tag">高频词积累 · ${fz.endless ? "无尽模式 · " : ""}本次结束</span>
+      <h2>这次过了 ${n} 个词，${fz.savedIds.length} 个加入单词本</h2>
       <div class="stats-row">
         <div class="stat"><div class="num" style="color:var(--accent)">${known}</div><div class="cap">认识</div></div>
         <div class="stat"><div class="num" style="color:var(--danger)">${unknown}</div><div class="cap">不会</div></div>
@@ -1365,21 +1390,22 @@ async function finishFreq(fz) {
             <div class="word-zh">${esc(w.zh)}</div>
           </div>
         </div>`).join("")}
+      ${stalled ? `<p class="desc" style="color:var(--danger);margin-top:10px">网络不太稳，下一批词没加载出来，先停在这里；点「接着往下」继续。</p>` : ""}
       ${fz.failed.length ? `<p class="desc" style="color:var(--danger);margin-top:10px">${fz.failed.length} 个词没能存进单词本（网络问题）：${esc(fz.failed.join("、"))}，可以在单词本里手动添加。</p>` : ""}
-      <p class="desc" style="margin-top:12px">${st ? `进度：已过 ${st.cursor.toLocaleString()} / ${st.total.toLocaleString()} 个。` : ""}${fz.savedIds.length ? "新加入的词已排进复习队列，趁热先复习一遍记得更牢。" : ""}${easy ? "这一段几乎全认识，可以往后跳一跳，更快碰到生词。" : ""}</p>
+      <p class="desc" style="margin-top:12px">${st ? `进度：已过 ${st.cursor.toLocaleString()} / ${st.total.toLocaleString()} 个。` : ""}${done ? "整个高频词表已经过完了！" : ""}${fz.savedIds.length ? "新加入的词已排进复习队列，趁热先复习一遍记得更牢。" : ""}${easy ? "这一段几乎全认识，可以往后跳一跳，更快碰到生词。" : ""}</p>
       <div>
-        <button class="btn" id="btnFreqMore" ${st && st.cursor >= st.total ? "disabled" : ""}>再来 ${FREQ_BATCH} 个</button>
+        <button class="btn" id="btnFreqMore" ${done ? "disabled" : ""}>${fz.endless ? "接着往下" : `再来 ${FREQ_BATCH} 个`}</button>
         ${easy ? `<button class="btn secondary" id="btnFreqSkip">往后跳 500 个再来</button>` : ""}
         ${fz.savedIds.length ? `<button class="btn secondary" id="btnFreqReview">马上复习这 ${fz.savedIds.length} 个词</button>` : ""}
         <button class="btn ghost" id="btnFreqBack">返回单词本</button>
       </div>
     </div>`;
   view.querySelectorAll(".word-say").forEach((b) => { b.onclick = () => speak(b.dataset.w); });
-  $("#btnFreqMore").onclick = () => startFreq();
+  $("#btnFreqMore").onclick = () => startFreq(fz.endless);
   $("#btnFreqBack").onclick = () => { memSub = "words"; renderMemory(); };
   const skip = $("#btnFreqSkip");
   if (skip) skip.onclick = async () => {
-    try { await api("/api/freq/cursor", { json: { cursor: st.cursor + 500 } }); startFreq(); }
+    try { await api("/api/freq/cursor", { json: { cursor: st.cursor + 500 } }); startFreq(fz.endless); }
     catch (e) { alert("跳转失败：" + e.message); }
   };
   const rv = $("#btnFreqReview");
