@@ -32,11 +32,12 @@ async function api(path, opts = {}) {
   let body;
   if (opts.json !== undefined) { headers["Content-Type"] = "application/json"; body = JSON.stringify(opts.json); }
   else if (opts.blob) { headers["Content-Type"] = opts.mime || "application/octet-stream"; body = opts.blob; }
-  const res = await fetch(path, { method: opts.method || (body ? "POST" : "GET"), headers, body });
+  // keepalive：页面关闭 / 切后台时请求也能发完（高频词作答用）
+  const res = await fetch(path, { method: opts.method || (body ? "POST" : "GET"), headers, body, keepalive: !!opts.keepalive });
   let data = {};
   try { data = await res.json(); } catch (_) {}
   if (res.status === 401 && AUTH.user) { doLogout(false); throw new Error("登录已过期"); }
-  if (!res.ok) throw new Error(data.error || `请求失败（${res.status}）`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `请求失败（${res.status}）`), { status: res.status });
   return data;
 }
 
@@ -92,7 +93,7 @@ function renderAuth(mode = "login") {
       AUTH.token = d.token;
       localStorage.setItem("sg_token", d.token);
       AUTH.user = await api("/api/me");
-      updateHeader(); refreshStreak();
+      updateHeader(); refreshStreak(); flushFreqQueue();
       newSession(); renderDaily();
       document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("active", x.dataset.tab === "daily"));
     } catch (e) {
@@ -1011,6 +1012,7 @@ function wordExchangesHtml(w, open = false) {
   </details>`;
 }
 async function renderWords(root) {
+  flushFreqQueue();
   let d, fq;
   try { [d, fq] = await Promise.all([api("/api/words"), api("/api/freq").catch(() => null)]); } catch (e) {
     root.innerHTML = `<p class="desc">加载失败：${esc(e.message)}</p>`;
@@ -1265,10 +1267,42 @@ function bindFreqKeys(fn) {
   freqKeyHandler = fn;
   if (fn) document.addEventListener("keydown", fn);
 }
+/* 作答同步：先记本机再发请求，服务端确认后才删（write-ahead）——断网、关页面、杀后台都不丢，联网后自动补交。
+   同一词表位置只认最后一次选择，请求按先后串行，服务端照最后一次落地（不会 / 认错了 → 入本，认识 → 撤回刚入本的词） */
+const freqQueueKey = () => "sg_freq_queue_" + (AUTH.user ? AUTH.user.username : "");
+const freqChains = {};
+const isDeadEnd = (e) => e.status >= 400 && e.status < 500 && e.status !== 401;  // 4xx（如词表已更新）补交也没用
+const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
+function freqPost(it, result, replay = false) {
+  const key = freqQueueKey();
+  if (!replay) save(key, { ...load(key, {}), [it.idx]: { result, word: it.word } });
+  const run = () => {
+    const cur = load(key, {})[it.idx];
+    if (replay && (!cur || cur.result !== result)) return null;  // 已经补交成功，或被后来的选择取代
+    const done = () => { const q = load(key, {}); if (q[it.idx] && q[it.idx].result === result) { delete q[it.idx]; save(key, q); } };
+    return api("/api/freq/answer", { json: { idx: it.idx, result, word: it.word }, keepalive: true })
+      .then((r) => { done(); return r; }, (e) => { if (isDeadEnd(e)) done(); throw e; });
+  };
+  const p = (freqChains[it.idx] || Promise.resolve()).then(run);
+  freqChains[it.idx] = p.catch(() => {});
+  return p;
+}
+function flushFreqQueue() {
+  if (!flushFreqQueue.p && AUTH.user) flushFreqQueue.p = (async () => {
+    for (const [idx, a] of Object.entries(load(freqQueueKey(), {}))) {
+      try { await freqPost({ idx: +idx, word: a.word }, a.result, true); }
+      catch (e) { if (!isDeadEnd(e)) break; }  // 还连不上就留到下次
+    }
+  })().finally(() => { flushFreqQueue.p = null; });
+  return flushFreqQueue.p || Promise.resolve();
+}
 async function startFreq(endless) {
+  await within(flushFreqQueue(), 3000);  // 先补交本机攒着的作答，进度对上了再取词
   let d;
   try { d = await api(`/api/freq?n=${FREQ_BATCH}`); } catch (e) { alert("加载失败：" + e.message); return; }
-  if (!d.items.length) { alert("整个高频词表已经过完了。"); return; }
+  const queued = load(freqQueueKey(), {});
+  d.items = d.items.filter((x) => !queued[x.idx]);  // 本机已答、还没补交上去的词不再出
+  if (!d.items.length) { alert(d.cursor >= d.total ? "整个高频词表已经过完了。" : "刚答的词还没同步上去，稍后再试。"); return; }
   renderFreqCard({ ...d, endless, i: 0, answers: new Map(), pending: [] });  // answers：词表位置 → 这张卡的作答记录
 }
 /* 无尽模式：缓冲只剩几个词时，后台从缓冲末尾往后续一批（不等服务端游标追上），一张接一张不停顿 */
@@ -1327,17 +1361,16 @@ function renderFreqCard(fz) {
     $("#freqPrev").onclick = prev;
     $("#freqQuit").onclick = quit;
   };
-  const showAdded = (a) => { noteEl.textContent = a.failed ? "加入单词本失败（网络问题）" : a.id ? "✓ 已加入单词本" : "加入单词本中…"; };
-  const send = (result) => {
-    const old = fz.answers.get(it.idx), a = { result };
+  const showAdded = (a) => {  // 失败过但本机队列里已经没有了 = 后来补交成功
+    const waiting = !!load(freqQueueKey(), {})[it.idx];
+    noteEl.textContent = a.ok || (a.failed && !waiting) ? "✓ 已加入单词本" : a.failed ? "暂时没存上（网络问题），已记在本机，联网后自动补交" : "加入单词本中…";
+  };
+  const send = (result) => {  // 改判「认识」也照常提交：服务端会撤回这个词刚加进单词本的记录
+    const a = { result };
     fz.answers.set(it.idx, a);
-    a.p = result === "known"
-      // 改判为认识：等原来那次入本请求落地，再把刚新加进单词本的词删掉；第一次答「认识」就只推进度
-      ? (old ? old.p.then(() => old.id && old.isNew && api(`/api/words/${old.id}`, { method: "DELETE" })) : api("/api/freq/answer", { json: { idx: it.idx, result } })).catch(() => {})
-      : api("/api/freq/answer", { json: { idx: it.idx, result } })
-        .then((r) => { if (r.saved) Object.assign(a, { id: r.saved.id, isNew: r.saved.new }); })
-        .catch(() => { a.failed = true; })
-        .then(() => showAdded(a));
+    a.p = freqPost(it, result)
+      .then(() => { a.ok = true; flushFreqQueue(); }, () => { a.failed = true; })
+      .then(() => { if (result !== "known") showAdded(a); });
     fz.pending.push(a.p);
   };
   const reveal = () => { $("#freqBack").classList.remove("hidden"); $("#freqHint").classList.add("hidden"); };
@@ -1376,13 +1409,15 @@ async function finishFreq(fz) {
   bindFreqKeys(null);
   view.innerHTML = `<div class="card"><p class="desc">保存中……</p></div>`;
   await Promise.allSettled(fz.pending);
+  await within(flushFreqQueue(), 3000);  // 收尾前把没发出去的再补交一次
   let st = null;
   try { st = await api("/api/freq"); } catch (_) {}
+  const queued = load(freqQueueKey(), {});
   const answered = fz.items.filter((x) => fz.answers.has(x.idx)).map((x) => ({ ...x, ...fz.answers.get(x.idx) }));
   const count = (r) => answered.filter((x) => x.result === r).length;
   const known = count("known"), unknown = count("unknown"), wrong = count("wrong"), n = answered.length;
-  const added = answered.filter((x) => x.result !== "known" && x.id);
-  const failed = answered.filter((x) => x.result !== "known" && x.failed).map((x) => x.word);
+  const added = answered.filter((x) => x.result !== "known" && !queued[x.idx]);
+  const waiting = answered.filter((x) => x.result !== "known" && queued[x.idx]).map((x) => x.word);
   const done = st && st.cursor >= st.total;
   const easy = st && !done && n >= 10 && known >= n * 0.95;
   const stalled = fz.endless && !fz.exhausted && fz.i >= fz.items.length;  // 缓冲见底但词表没完：下一批没加载出来
@@ -1403,7 +1438,7 @@ async function finishFreq(fz) {
           </div>
         </div>`).join("")}
       ${stalled ? `<p class="desc" style="color:var(--danger);margin-top:10px">网络不太稳，下一批词没加载出来，先停在这里；点「接着往下」继续。</p>` : ""}
-      ${failed.length ? `<p class="desc" style="color:var(--danger);margin-top:10px">${failed.length} 个词没能存进单词本（网络问题）：${esc(failed.join("、"))}，可以在单词本里手动添加。</p>` : ""}
+      ${waiting.length ? `<p class="desc" style="color:var(--danger);margin-top:10px">${waiting.length} 个词还没存进单词本（网络问题）：${esc(waiting.join("、"))}。已记在本机，联网后会自动补交。</p>` : ""}
       <p class="desc" style="margin-top:12px">${st ? `进度：已过 ${st.cursor.toLocaleString()} / ${st.total.toLocaleString()} 个。` : ""}${done ? "整个高频词表已经过完了！" : ""}${added.length ? "新加入的词已排进复习队列，趁热先复习一遍记得更牢。" : ""}${easy ? "这一段几乎全认识，可以往后跳一跳，更快碰到生词。" : ""}</p>
       <div>
         <button class="btn" id="btnFreqMore" ${done ? "disabled" : ""}>${fz.endless ? "接着往下" : `再来 ${FREQ_BATCH} 个`}</button>
@@ -1424,8 +1459,8 @@ async function finishFreq(fz) {
   if (rv) rv.onclick = async () => {
     let d;
     try { d = await api("/api/words"); } catch (e) { alert("加载失败：" + e.message); return; }
-    const ids = added.map((x) => x.id);
-    const items = (d.items || []).filter((w) => ids.includes(w.id));
+    const words = added.map((x) => x.word);
+    const items = (d.items || []).filter((w) => words.includes(w.word));
     if (items.length) renderWordQuiz({ mode: "flash", items, idx: 0, tally: { know: 0, unsure: 0, forgot: 0 } });
   };
 }
@@ -2059,6 +2094,7 @@ function bindRecList(root) {
     try { AUTH.user = await api("/api/me"); } catch (_) { AUTH.token = null; localStorage.removeItem("sg_token"); }
   }
   updateHeader();
-  if (AUTH.user) { refreshStreak(); renderDaily(); }
+  if (AUTH.user) { refreshStreak(); renderDaily(); flushFreqQueue(); }  // 补交上次断网 / 关页面时没发出去的高频词作答
   else renderAuth();
 })();
+window.addEventListener("online", () => flushFreqQueue());

@@ -806,6 +806,9 @@ def freq_answer(uid, idx, result):
     rank, word, _phonetic, zh = words[idx]
     with db() as c:
         c.execute("UPDATE users SET freq_cursor=MAX(COALESCE(freq_cursor, 0), ?) WHERE id=?", (idx + 1, uid))
+        if result == "known":  # 同一位置以最后一次作答为准：改判「认识」（含断网后补交）就撤掉它刚因不会/认错了入本、还没复习过的记录
+            c.execute("DELETE FROM vocab_words WHERE user_id=? AND word_key=? AND source='freq' AND reviews=0",
+                      (uid, word_key(word)))
     saved = None
     if result != "known":
         saved = upsert_word(uid, word, meaning_zh=zh, source="freq", context="高频词第 %d 个（COCA #%d）· %s" % (
@@ -1733,6 +1736,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     idx = int(d.get("idx"))
                 except (TypeError, ValueError):
                     return self.fail("bad idx")
+                words = freq_words()
+                if d.get("word") and 0 <= idx < len(words) and words[idx][1] != d["word"]:
+                    return self.fail("词表已更新，这条作答作废", 409)  # 本机攒着的旧作答在词表重新生成后补交：位置已对不上
                 out = freq_answer(user["id"], idx, d["result"])
                 return self.send_json(out) if out else self.fail("not found", 404)
             if p == "/api/freq/cursor":
