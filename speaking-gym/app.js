@@ -1122,7 +1122,7 @@ async function renderWords(root) {
           <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
           ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}
           ${wordExchangesHtml(w)}
-          <div class="muted-sm">${w.date} · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累" }[w.source] || "手动添加"} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
+          <div class="muted-sm">${w.date} · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累" }[w.source] || "手动添加"}${w.source === "freq" && FREQ_REASONS[w.reason] ? ` · ${FREQ_REASONS[w.reason]}` : ""} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
             ${w.source !== "chat" && !(w.exchanges || []).length ? `<button class="link-btn word-ask" data-w="${esc(w.word)}">让 Buddy 讲讲这个词</button>` : ""}</div>
         </div>
         <button class="note-del word-del" data-id="${w.id}">删除</button>
@@ -1201,6 +1201,16 @@ function blankOut(example, word) {
   const blanked = example.replace(re, "_____");
   return blanked === example ? example.replace(new RegExp(word.split(/\s+/)[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\w*", "ig"), "_____") : blanked;
 }
+function sensesHtml(senses, word, blank) {
+  return senses.map(([pos, en, ...exs]) => `
+    <div class="sense">
+      ${en ? `<div class="word-en">${pos ? `<span class="pos">${esc(pos)}</span>` : ""}${esc(en)}</div>` : ""}
+      ${exs.map((x) => `<div class="word-ex">${blank ? esc(blankOut(x, word)) : `${esc(x)} <button class="link-btn say-ex" data-t="${esc(x)}">🔊</button>`}</div>`).join("")}
+    </div>`).join("");
+}
+const bindSayEx = (root) => root.querySelectorAll(".say-ex").forEach((b) => { b.onclick = () => { b.blur(); speak(b.dataset.t); }; });
+const wordSenses = (w) => (w.senses && w.senses.length ? w.senses
+  : w.meaning_en || w.example ? [["", w.meaning_en || "", ...(w.example ? [w.example] : [])]] : []);
 function renderWordQuiz(quiz) {
   const { mode, items, idx, tally } = quiz;
   if (idx >= items.length) {
@@ -1231,19 +1241,22 @@ function renderWordQuiz(quiz) {
     quiz.idx++;
     renderWordQuiz(quiz);
   };
+  const senses = wordSenses(w), hasEn = senses.some((s) => s[1]);
+  const reason = w.source === "freq" && FREQ_REASONS[w.reason];
+  const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span>${reason ? `<span class="reason-tag">${reason}</span>` : ""}`;
   const detail = `
     <div class="word-reveal">
-      ${w.meaning_en ? `<div class="word-en" style="font-size:18px">${esc(w.meaning_en)}</div>` : ""}
-      ${w.example ? `<div class="word-ex">${esc(w.example)} <button class="link-btn" id="btnSayEx">🔊</button></div>` : ""}
-      <div class="word-zh zh-under" style="font-size:${w.meaning_en ? 15 : 18}px">${esc(w.meaning_zh || "（无中文释义）")}</div>
+      ${sensesHtml(senses, w.word)}
+      <div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 18}px">${esc(w.meaning_zh || "（无中文释义）")}</div>
       ${wordExchangesHtml(w)}
     </div>`;
   if (mode === "flash") {
     view.innerHTML = `
       <div class="card">
-        <span class="step-tag">单词复习 · 看词想义 · ${progress}</span>
+        ${tag("看词想义")}
         <div class="flashcard">
           <div class="flash-word">${esc(w.word)} <button class="link-btn" id="btnSay" style="font-size:22px">🔊</button></div>
+          ${w.phonetic ? `<div class="freq-ph">/${esc(w.phonetic)}/</div>` : ""}
           <div class="muted-sm">先在心里说出意思和一个例句，再翻开</div>
           <div id="flashBack" class="hidden">${detail}</div>
         </div>
@@ -1253,10 +1266,11 @@ function renderWordQuiz(quiz) {
         </div>
       </div>`;
     $("#btnSay").onclick = () => speak(w.word);
-    if (w.example) $("#btnSayEx").onclick = () => speak(w.example);
+    bindSayEx(view);
     $("#btnQuizQuit").onclick = () => { memSub = "words"; renderMemory(); };
     $("#btnFlip").onclick = () => {
       $("#flashBack").classList.remove("hidden");
+      if (w.reason === "sound") speak(w.word);
       $("#flashActions").innerHTML = `
         <button class="btn" id="gKnow">认识 ✓</button>
         <button class="btn secondary" id="gUnsure">模糊</button>
@@ -1269,11 +1283,10 @@ function renderWordQuiz(quiz) {
   }
   view.innerHTML = `
     <div class="card">
-      <span class="step-tag">单词复习 · 看义写词 · ${progress}</span>
+      ${tag("看义写词")}
       <div class="flashcard">
-        ${w.meaning_en ? `<div class="word-en" style="font-size:20px">${esc(w.meaning_en)}</div>` : ""}
-        ${w.example ? `<div class="word-ex">${esc(blankOut(w.example, w.word))}</div>` : ""}
-        ${w.meaning_zh || !w.meaning_en ? `<div class="word-zh zh-under" style="font-size:${w.meaning_en ? 15 : 20}px">${esc(w.meaning_zh || "（无释义）")}</div>` : ""}
+        ${sensesHtml(senses, w.word, true)}
+        ${w.meaning_zh || !hasEn ? `<div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 20}px">${esc(w.meaning_zh || "（无释义）")}</div>` : ""}
         <div class="word-add" style="margin-top:12px">
           <input id="recallInput" placeholder="写出这个英文单词/短语，回车提交" autocomplete="off" autocapitalize="off">
           <button class="btn" id="btnRecallCheck">检查</button>
@@ -1297,7 +1310,7 @@ function renderWordQuiz(quiz) {
         ${ok ? `<span class="score good">✓ 正确</span>` : `<span class="score low">✗ ${typed ? "拼错了" : "看答案"}</span>`}
         <div style="margin-top:6px;font-size:20px;font-weight:700">${esc(w.word)} <button class="link-btn" id="btnSay2">🔊</button></div>
         ${typed && !ok ? `<div class="muted-sm">你写的是：${esc(typed)}</div>` : ""}
-        ${w.example ? `<div class="word-ex" style="margin-top:6px">${esc(w.example)}</div>` : ""}
+        ${senses.flatMap(([, , ...exs]) => exs).map((x) => `<div class="word-ex" style="margin-top:6px">${esc(x)}</div>`).join("")}
         ${wordExchangesHtml(w, !ok)}
       </div>`;
     $("#btnSay2").onclick = () => speak(w.word);
@@ -1320,6 +1333,7 @@ function renderWordQuiz(quiz) {
 
 /* ---- 高频词积累：按 COCA 词频从高到低过词，不会 / 认错了的词自动进单词本 ---- */
 const FREQ_BATCH = 20;
+const FREQ_REASONS = { unknown: "不会", wrong: "认错意思", sound: "不会读音", senses: "一词多义" };
 function freqPanelHtml(fq) {
   if (!fq || !fq.total) return "";
   const done = fq.cursor >= fq.total;
@@ -1390,8 +1404,8 @@ function topUpFreq(fz) {
     .catch(() => {})
     .finally(() => { fz.loading = null; });
 }
-/* 没答过的卡：词面（认识 / 不会）→ 认识后翻开核对（对 / 认错了）；不会 → 翻开并入本（下一个）。
-   按「上一个」回到答过的卡：直接翻开、显示刚才的选择，可以改判（认识 → 认错了入本；不会 / 认错了 → 其实认识移出） */
+/* 没答过的卡：词面（认识 / 不会）→ 认识后翻开核对（对 / 认错意思 · 不会读音 · 一词多义 → 入本）；不会 → 翻开并入本（下一个）。
+   按「上一个」回到答过的卡：直接翻开、显示刚才的选择，可以改判（认识 → 选原因入本；认错的可改选原因；不会 / 认错 → 其实认识移出） */
 function renderFreqCard(fz) {
   if (fz.endless && fz.items.length - fz.i <= 5) topUpFreq(fz);
   if (fz.i >= fz.items.length) {
@@ -1411,14 +1425,13 @@ function renderFreqCard(fz) {
         ${it.phonetic ? `<div class="freq-ph">/${esc(it.phonetic)}/</div>` : ""}
         <div class="muted-sm" id="freqHint">认识的话先在心里说出意思，再点「认识」翻开核对</div>
         <div id="freqBack" class="word-reveal hidden">
-          ${it.en ? `<div class="word-en">${esc(it.en)}</div>` : ""}
-          ${it.ex ? `<div class="word-ex">${esc(it.ex)} <button class="link-btn" id="btnSayEx">🔊</button></div>` : ""}
+          ${sensesHtml(it.senses || [], it.word)}
           <div class="zh-under">${it.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>
           <div class="muted-sm" id="freqNote"></div>
         </div>
       </div>
       <div style="margin-top:14px" id="freqActions"></div>
-      <div class="muted-sm kbd-tip">键盘：1 或空格 = 认识 / 对 / 下一个，2 = 不会 / 认错了，← = 上一个，Esc = 结束</div>
+      <div class="muted-sm kbd-tip">键盘：1 或空格 = 认识 / 对 / 下一个，2 = 不会 / 认错意思，3 = 不会读音，4 = 一词多义，← = 上一个，Esc = 结束</div>
     </div>`;
   const card = $("#freqCard"), noteEl = $("#freqNote");
   let keys = {}, stamp = 0;
@@ -1442,7 +1455,7 @@ function renderFreqCard(fz) {
   };
   const showAdded = (a) => {  // 失败过但本机队列里已经没有了 = 后来补交成功
     const waiting = !!load(freqQueueKey(), {})[it.idx];
-    noteEl.textContent = a.ok || (a.failed && !waiting) ? "✓ 已加入单词本" : a.failed ? "暂时没存上（网络问题），已记在本机，联网后自动补交" : "加入单词本中…";
+    noteEl.textContent = `「${FREQ_REASONS[a.result]}」` + (a.ok || (a.failed && !waiting) ? "✓ 已加入单词本" : a.failed ? "暂时没存上（网络问题），已记在本机，联网后自动补交" : "加入单词本中…");
   };
   const send = (result) => {  // 改判「认识」也照常提交：服务端会撤回这个词刚加进单词本的记录
     const a = { result };
@@ -1453,29 +1466,38 @@ function renderFreqCard(fz) {
     fz.pending.push(a.p);
   };
   const reveal = () => { $("#freqBack").classList.remove("hidden"); $("#freqHint").classList.add("hidden"); };
+  const reasonBtns = (cur) => [["认错意思", "wrong", "2"], ["不会读音", "sound", "3"], ["一词多义", "senses", "4"]].map(([label, r, key]) =>
+    [(cur === r ? "✓ " : "") + label, r === "wrong" ? "secondary danger-btn" : "secondary", key, () => {
+      if (cur !== r) send(r);
+      if (r !== "sound") return next();
+      showAdded(fz.answers.get(it.idx));
+      speak(it.word);
+      inBook(r);
+    }]);
   const check = () => actions([  // 翻开核对：回看已判「认识」的卡时，点「对」不重复提交
     ["对，下一个", "", "1", () => { if (!before || before.result !== "known") send("known"); next(); }],
-    ["认错了", "secondary danger-btn", "2", () => { send("wrong"); next(); }],
+    ...reasonBtns(),
   ]);
-  // 已入本：「其实认识」故意不给快捷键，免得连按两下 2 把刚点的「不会」又撤销了
-  const inBook = () => actions([["下一个", "", "1", next], ["其实认识", "secondary", "", () => { send("known"); next(); }]]);
+  // 已入本：「其实认识」故意不给快捷键，免得连按两下 2 把刚点的「不会」又撤销了；认错的可以改选原因
+  const inBook = (cur) => actions([["下一个", "", "1", next], ...(cur === "unknown" ? [] : reasonBtns(cur)),
+    ["其实认识", "secondary", "", () => { send("known"); next(); }]]);
   if (!before) {
     actions([
       ["认识", "", "1", () => { reveal(); check(); }],
-      ["不会", "secondary danger-btn", "2", () => { reveal(); send("unknown"); showAdded(fz.answers.get(it.idx)); speak(it.word); inBook(); }],
+      ["不会", "secondary danger-btn", "2", () => { reveal(); send("unknown"); showAdded(fz.answers.get(it.idx)); speak(it.word); inBook("unknown"); }],
     ]);
   } else if (before.result === "known") {
     reveal();
-    noteEl.textContent = "刚才选了「认识」：看清释义，记错了就点「认错了」";
+    noteEl.textContent = "刚才选了「认识」：看清释义，认错了就选个原因收进单词本";
     check();
   } else {
     reveal();
     showAdded(before);
     before.p.then(() => showAdded(before));
-    inBook();
+    inBook(before.result);
   }
   $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(it.word); };
-  if (it.ex) $("#btnSayEx").onclick = (e) => { e.currentTarget.blur(); speak(it.ex); };
+  bindSayEx(card);
   bindFreqKeys((e) => {
     if (!card.isConnected) return bindFreqKeys(null);
     const tag = e.target.tagName;
@@ -1495,7 +1517,7 @@ async function finishFreq(fz) {
   const queued = load(freqQueueKey(), {});
   const answered = fz.items.filter((x) => fz.answers.has(x.idx)).map((x) => ({ ...x, ...fz.answers.get(x.idx) }));
   const count = (r) => answered.filter((x) => x.result === r).length;
-  const known = count("known"), unknown = count("unknown"), wrong = count("wrong"), n = answered.length;
+  const known = count("known"), unknown = count("unknown"), n = answered.length, wrong = n - known - unknown;
   const added = answered.filter((x) => x.result !== "known" && !queued[x.idx]);
   const waiting = answered.filter((x) => x.result !== "known" && queued[x.idx]).map((x) => x.word);
   const done = st && st.cursor >= st.total;
@@ -1513,7 +1535,7 @@ async function finishFreq(fz) {
       ${added.map((w) => `
         <div class="word-item">
           <div class="word-main">
-            <div class="word-head"><b class="word-text">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button>${w.phonetic ? `<span class="freq-ph">/${esc(w.phonetic)}/</span>` : ""}</div>
+            <div class="word-head"><b class="word-text">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button>${w.phonetic ? `<span class="freq-ph">/${esc(w.phonetic)}/</span>` : ""}<span class="reason-tag">${FREQ_REASONS[w.result]}</span></div>
             <div class="word-zh">${esc(w.zh)}</div>
           </div>
         </div>`).join("")}

@@ -230,6 +230,10 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .zh-under { margin-top: 10px; }
 .zh-under:first-child { margin-top: 0; }
 .zh-under:not(:first-child) .freq-zh { font-size: 15px; }
+.sense + .sense { margin-top: 10px; }
+.pos { font-size: 12px; font-weight: 700; color: var(--accent); margin-right: 6px; }
+.flashcard > .sense .word-en { font-size: 19px; }
+.reason-tag { display: inline-block; font-size: 12px; font-weight: 700; color: var(--danger); background: #fbeceb; border-radius: 6px; padding: 2px 8px; margin-left: 6px; }
 
 /* 高频词积累 */
 .freq-panel { background: #f8faf9; border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin: 4px 0 16px; }

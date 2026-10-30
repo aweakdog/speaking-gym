@@ -11,9 +11,9 @@
   - 录音自动上传，服务器端 Whisper 精确转写
   - DeepSeek 按评分量表打分（流利度/词汇/语法/内容）+ 逐句纠错 + 口语范本
   - 多用户账号、评分曲线、历史存档、可选公开的录音广场
-  - 单词本：对话中问到的生词自动收录 + 高频词积累（按 COCA 词频从高到低过词，不会/认错的自动入本）+ 间隔复习
+  - 单词本：对话中问到的生词自动收录 + 高频词积累（按 COCA 词频从高到低过词，不会/认错的自动入本，认错时标明原因：认错意思 / 不会读音 / 一词多义）+ 间隔复习
     - 高频词表 `speaking-gym/freq_words.json` 由 `tools/build_freq_words.py` 从 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT License）生成，许可声明随文件附带
-    - 背词卡片先给英文释义和口语例句、再给中文，练英文思维；高频词的英文释义 + 例句 `speaking-gym/freq_defs.json` 由 `tools/build_freq_defs.py` 调 DeepSeek 离线生成（可断点续跑；词表重新生成后再跑一次即可补齐新词）
+    - 背词卡片先给英文义项和口语例句、再给中文，练英文思维；高频词常用的 1-3 个英文义项（词性 + 释义 + 例句）`speaking-gym/freq_defs.json` 由 `tools/build_freq_defs.py` 调 DeepSeek 离线生成（可断点续跑；词表重新生成后再跑一次即可补齐新词）
 
 ## 部署
 

@@ -143,6 +143,10 @@ def init_db():
             wcols = [r[1] for r in c.execute("PRAGMA table_info(vocab_words)")]
             if "exchanges" not in wcols:
                 c.execute("ALTER TABLE vocab_words ADD COLUMN exchanges TEXT")
+            if "reason" not in wcols:
+                c.execute("ALTER TABLE vocab_words ADD COLUMN reason TEXT")
+                c.execute("UPDATE vocab_words SET reason=CASE WHEN context LIKE '%· 不会' THEN 'unknown' ELSE 'wrong' END "
+                          "WHERE source='freq'")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,7 +179,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             word TEXT NOT NULL, word_key TEXT NOT NULL,
             meaning_en TEXT, meaning_zh TEXT, example TEXT, context TEXT, exchanges TEXT,
-            source TEXT, created INTEGER, date TEXT,
+            source TEXT, reason TEXT, created INTEGER, date TEXT,
             reviews INTEGER DEFAULT 0, correct INTEGER DEFAULT 0, streak INTEGER DEFAULT 0,
             due INTEGER DEFAULT 0, last_reviewed INTEGER,
             UNIQUE(user_id, word_key)
@@ -787,8 +791,20 @@ def freq_words():
 
 
 def freq_defs():
-    """{word: [en, ex]}：高频词的英文释义 + 口语例句，由 tools/build_freq_defs.py 调 DeepSeek 离线生成。"""
+    """{word: [[词性, 英文释义, 例句…], …]}：高频词常用的 1-3 个英文义项 + 口语例句，由 tools/build_freq_defs.py 调 DeepSeek 离线生成。"""
     return (cached_json("freq_defs.json") or {}).get("defs") or {}
+
+
+FREQ_REASONS = {"unknown": "不会", "wrong": "认错意思", "sound": "不会读音", "senses": "一词多义"}
+
+
+def attach_freq_info(rows):
+    """高频词积累收进来的词：附上卡片上看过的英文义项和音标，复习时照样显示。"""
+    if any(r.get("source") == "freq" for r in rows):
+        defs, phonetic = freq_defs(), {w[1]: w[2] for w in freq_words()}
+        for r in rows:
+            if r.get("source") == "freq":
+                r["senses"], r["phonetic"] = defs.get(r["word"]) or [], phonetic.get(r["word"], "")
 
 
 def freq_state(uid, n=0, start=0):
@@ -804,8 +820,8 @@ def freq_state(uid, n=0, start=0):
             break
         rank, word, phonetic, zh = words[i]
         if word_key(word) not in have:
-            en, ex = defs.get(word) or ("", "")
-            items.append({"idx": i, "rank": rank, "word": word, "phonetic": phonetic, "zh": zh, "en": en, "ex": ex})
+            items.append({"idx": i, "rank": rank, "word": word, "phonetic": phonetic, "zh": zh,
+                          "senses": defs.get(word) or []})
     return {"total": len(words), "cursor": cursor, "added": added, "items": items}
 
 
@@ -821,11 +837,15 @@ def freq_answer(uid, idx, result):
                       (uid, word_key(word)))
     saved = None
     if result != "known":
-        en, ex = freq_defs().get(word) or ("", "")
-        saved = upsert_word(uid, word, meaning_en=en, meaning_zh=zh, example=ex, source="freq",
-                            context="高频词第 %d 个（COCA #%d）· %s" % (
-                                idx + 1, rank, "不会" if result == "unknown" else "认错了"))
-        if saved and saved["new"] and DEEPSEEK_KEY and not (en and ex):
+        senses = freq_defs().get(word) or []
+        context = "高频词第 %d 个（COCA #%d）· %s" % (idx + 1, rank, FREQ_REASONS[result])
+        saved = upsert_word(uid, word, meaning_en=senses[0][1] if senses else "", meaning_zh=zh,
+                            example=senses[0][2] if senses else "", source="freq", context=context)
+        if saved:
+            with db() as c:
+                c.execute("UPDATE vocab_words SET reason=?, context=? WHERE id=? AND source='freq'",
+                          (result, context, saved["id"]))
+        if saved and saved["new"] and DEEPSEEK_KEY and not senses:
             threading.Thread(target=enrich_word, args=(saved["id"], word), daemon=True).start()
     return {"ok": True, "saved": saved}
 
@@ -1801,7 +1821,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not user:
                     return self.fail("unauthorized", 401)
                 d = self.body_json()
-                if d.get("result") not in ("known", "unknown", "wrong"):
+                if d.get("result") != "known" and d.get("result") not in FREQ_REASONS:
                     return self.fail("bad result")
                 try:
                     idx = int(d.get("idx"))
@@ -2023,10 +2043,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 now = int(time.time())
                 with db() as c:
                     rows = [dict(r) for r in c.execute(
-                        "SELECT id, word, meaning_en, meaning_zh, example, context, exchanges, source, created, date, "
-                        "reviews, correct, streak, due, last_reviewed FROM vocab_words WHERE user_id=? ORDER BY created DESC",
-                        (user["id"],)).fetchall()]
+                        "SELECT id, word, meaning_en, meaning_zh, example, context, exchanges, source, reason, created, "
+                        "date, reviews, correct, streak, due, last_reviewed FROM vocab_words WHERE user_id=? "
+                        "ORDER BY created DESC", (user["id"],)).fetchall()]
                 backfill_word_exchanges(user["id"], rows)
+                attach_freq_info(rows)
                 for r in rows:
                     try:
                         r["exchanges"] = json.loads(r["exchanges"]) if r["exchanges"] else []
@@ -2044,6 +2065,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     n = 10
                 rows = pick_quiz_words(user["id"], n)
                 backfill_word_exchanges(user["id"], rows)
+                attach_freq_info(rows)
                 for r in rows:
                     try:
                         r["exchanges"] = json.loads(r["exchanges"]) if r.get("exchanges") else []
