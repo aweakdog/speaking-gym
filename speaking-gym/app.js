@@ -1213,6 +1213,7 @@ const wordSenses = (w) => (w.senses && w.senses.length ? w.senses
   : w.meaning_en || w.example ? [["", w.meaning_en || "", ...(w.example ? [w.example] : [])]] : []);
 function renderWordQuiz(quiz) {
   const { mode, items, idx, tally } = quiz;
+  const quit = () => { bindCardKeys(null); memSub = "words"; renderMemory(); };
   if (idx >= items.length) {
     view.innerHTML = `
       <div class="card">
@@ -1225,17 +1226,21 @@ function renderWordQuiz(quiz) {
         </div>
         <p class="desc">认识的词会被推到更远的日期再考；忘了的 6 小时后就会再出现。每天来一轮，单词本会自己"变薄"。</p>
         <div style="margin-top:12px">
-          <button class="btn" id="btnQuizMore">再来一轮</button>
-          <button class="btn secondary" id="btnQuizBack">返回单词本</button>
+          <button class="btn" id="btnQuizMore">再来一轮 <kbd>1</kbd></button>
+          <button class="btn secondary" id="btnQuizBack">返回单词本 <kbd>Esc</kbd></button>
         </div>
       </div>`;
     $("#btnQuizMore").onclick = () => startWordQuiz(mode);
-    $("#btnQuizBack").onclick = () => { memSub = "words"; renderMemory(); };
+    $("#btnQuizBack").onclick = quit;
+    bindCardKeys(view.firstElementChild, (k) => (k === "Escape" ? quit : k === "1" ? () => startWordQuiz(mode) : null));
     return;
   }
   const w = items[idx];
   const progress = `${idx + 1} / ${items.length}`;
+  let graded = false, keys = {};
   const grade = async (result) => {
+    if (graded) return;
+    graded = true;
     tally[result]++;
     try { await api(`/api/words/${w.id}/review`, { json: { result } }); } catch (_) {}
     quiz.idx++;
@@ -1261,24 +1266,29 @@ function renderWordQuiz(quiz) {
           <div id="flashBack" class="hidden">${detail}</div>
         </div>
         <div style="margin-top:14px" id="flashActions">
-          <button class="btn" id="btnFlip">翻开看释义</button>
-          <button class="btn ghost" id="btnQuizQuit">退出</button>
+          <button class="btn" id="btnFlip">翻开看释义 <kbd>空格</kbd></button>
+          <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
         </div>
+        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了，Esc = 退出</div>
       </div>`;
-    $("#btnSay").onclick = () => speak(w.word);
+    $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(w.word); };
     bindSayEx(view);
-    $("#btnQuizQuit").onclick = () => { memSub = "words"; renderMemory(); };
-    $("#btnFlip").onclick = () => {
+    $("#btnQuizQuit").onclick = quit;
+    const flip = () => {
       $("#flashBack").classList.remove("hidden");
       if (w.reason === "sound") speak(w.word);
       $("#flashActions").innerHTML = `
-        <button class="btn" id="gKnow">认识 ✓</button>
-        <button class="btn secondary" id="gUnsure">模糊</button>
-        <button class="btn secondary danger-btn" id="gForgot">忘了 ✗</button>`;
-      $("#gKnow").onclick = () => grade("know");
-      $("#gUnsure").onclick = () => grade("unsure");
-      $("#gForgot").onclick = () => grade("forgot");
+        <button class="btn" id="gKnow">认识 ✓ <kbd>1</kbd></button>
+        <button class="btn secondary" id="gUnsure">模糊 <kbd>2</kbd></button>
+        <button class="btn secondary danger-btn" id="gForgot">忘了 ✗ <kbd>3</kbd></button>`;
+      keys = { "1": () => grade("know"), "2": () => grade("unsure"), "3": () => grade("forgot") };
+      $("#gKnow").onclick = keys["1"];
+      $("#gUnsure").onclick = keys["2"];
+      $("#gForgot").onclick = keys["3"];
     };
+    keys = { "1": flip };
+    $("#btnFlip").onclick = flip;
+    bindCardKeys(view.firstElementChild, (k) => (k === "Escape" ? quit : keys[k]));
     return;
   }
   view.innerHTML = `
@@ -1288,19 +1298,20 @@ function renderWordQuiz(quiz) {
         ${sensesHtml(senses, w.word, true)}
         ${w.meaning_zh || !hasEn ? `<div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 20}px">${esc(w.meaning_zh || "（无释义）")}</div>` : ""}
         <div class="word-add" style="margin-top:12px">
-          <input id="recallInput" placeholder="写出这个英文单词/短语，回车提交" autocomplete="off" autocapitalize="off">
+          <input id="recallInput" placeholder="写出这个英文单词/短语，回车提交；想不起来直接回车看答案" autocomplete="off" autocapitalize="off">
           <button class="btn" id="btnRecallCheck">检查</button>
         </div>
         <div id="recallResult"></div>
       </div>
       <div style="margin-top:14px" id="recallActions">
         <button class="btn ghost" id="btnRecallReveal">想不起来，看答案</button>
-        <button class="btn ghost" id="btnQuizQuit">退出</button>
+        <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
       </div>
+      <div class="muted-sm kbd-tip">键盘：回车 = 检查（空着回车 = 看答案），看完答案后回车 / 1 = 下一个，Esc = 退出</div>
     </div>`;
   const input = $("#recallInput");
   input.focus();
-  $("#btnQuizQuit").onclick = () => { memSub = "words"; renderMemory(); };
+  $("#btnQuizQuit").onclick = quit;
   const norm = (s) => s.toLowerCase().replace(/[^a-z0-9' ]/g, "").replace(/\s+/g, " ").trim();
   const showAnswer = (ok, typed) => {
     input.disabled = true;
@@ -1313,12 +1324,13 @@ function renderWordQuiz(quiz) {
         ${senses.flatMap(([, , ...exs]) => exs).map((x) => `<div class="word-ex" style="margin-top:6px">${esc(x)}</div>`).join("")}
         ${wordExchangesHtml(w, !ok)}
       </div>`;
-    $("#btnSay2").onclick = () => speak(w.word);
+    $("#btnSay2").onclick = (e) => { e.currentTarget.blur(); speak(w.word); };
     speak(w.word);
-    $("#recallActions").innerHTML = ok
-      ? `<button class="btn" id="gNext">下一个 →</button>`
-      : `<button class="btn" id="gNext">记住了，下一个 →</button>`;
-    $("#gNext").onclick = () => grade(ok ? "know" : "forgot");
+    $("#recallActions").innerHTML = `<button class="btn" id="gNext">${ok ? "下一个 →" : "记住了，下一个 →"} <kbd>1</kbd></button>
+      <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>`;
+    keys = { "1": () => grade(ok ? "know" : "forgot") };
+    $("#gNext").onclick = keys["1"];
+    $("#btnQuizQuit").onclick = quit;
     $("#gNext").focus();
   };
   const check = () => {
@@ -1327,8 +1339,12 @@ function renderWordQuiz(quiz) {
     showAnswer(norm(typed) === norm(w.word), typed);
   };
   $("#btnRecallCheck").onclick = check;
-  input.onkeydown = (e) => { if (e.key === "Enter") check(); };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); if (input.value.trim()) check(); else showAnswer(false, ""); }
+    else if (e.key === "Escape") quit();
+  };
   $("#btnRecallReveal").onclick = () => showAnswer(false, "");
+  bindCardKeys(view.firstElementChild, (k) => (k === "Escape" ? quit : keys[k]));
 }
 
 /* ---- 高频词积累：按 COCA 词频从高到低过词，不会 / 认错了的词自动进单词本 ---- */
@@ -1352,11 +1368,17 @@ function freqPanelHtml(fq) {
     </div>`;
 }
 /* 卡片监听全局按键：同一时间只挂一个，换卡/退出时摘掉 */
-let freqKeyHandler = null;
-function bindFreqKeys(fn) {
-  if (freqKeyHandler) document.removeEventListener("keydown", freqKeyHandler);
-  freqKeyHandler = fn;
-  if (fn) document.addEventListener("keydown", fn);
+let cardKeyHandler = null;
+function bindCardKeys(card, keyFor) {
+  if (cardKeyHandler) document.removeEventListener("keydown", cardKeyHandler);
+  cardKeyHandler = card ? (e) => {
+    if (!card.isConnected) return bindCardKeys(null);
+    const tag = e.target.tagName;
+    if (e.repeat || e.metaKey || e.ctrlKey || e.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
+    const fn = keyFor(e.key === " " || e.key === "Enter" ? (tag === "BUTTON" ? "" : "1") : e.key);
+    if (fn) { e.preventDefault(); fn(); }
+  } : null;
+  if (cardKeyHandler) document.addEventListener("keydown", cardKeyHandler);
 }
 /* 作答同步：先记本机再发请求，服务端确认后才删（write-ahead）——断网、关页面、杀后台都不丢，联网后自动补交。
    同一词表位置只认最后一次选择，请求按先后串行，服务端照最后一次落地（不会 / 认错了 → 入本，认识 → 撤回刚入本的词） */
@@ -1404,7 +1426,7 @@ function topUpFreq(fz) {
     .catch(() => {})
     .finally(() => { fz.loading = null; });
 }
-/* 没答过的卡：词面（认识 / 不会）→ 认识后翻开核对（对 / 认错意思 · 不会读音 · 一词多义 → 入本）；不会 → 翻开并入本（下一个）。
+/* 没答过的卡：词面（认识 / 不会 / 不会读音 / 一词多义）→ 认识后翻开核对（对 / 认错意思 · 不会读音 · 一词多义 → 入本）；不会 → 翻开并入本（下一个）。
    按「上一个」回到答过的卡：直接翻开、显示刚才的选择，可以改判（认识 → 选原因入本；认错的可改选原因；不会 / 认错 → 其实认识移出） */
 function renderFreqCard(fz) {
   if (fz.endless && fz.items.length - fz.i <= 5) topUpFreq(fz);
@@ -1437,7 +1459,7 @@ function renderFreqCard(fz) {
   let keys = {}, stamp = 0;
   const quit = () => {  // 答过词就看这次的小结，一个没答直接回单词本
     if (fz.answers.size) return finishFreq(fz);
-    bindFreqKeys(null);
+    bindCardKeys(null);
     memSub = "words";
     renderMemory();
   };
@@ -1466,13 +1488,11 @@ function renderFreqCard(fz) {
     fz.pending.push(a.p);
   };
   const reveal = () => { $("#freqBack").classList.remove("hidden"); $("#freqHint").classList.add("hidden"); };
+  const stay = (r) => { reveal(); showAdded(fz.answers.get(it.idx)); if (r !== "senses") speak(it.word); inBook(r); };
   const reasonBtns = (cur) => [["认错意思", "wrong", "2"], ["不会读音", "sound", "3"], ["一词多义", "senses", "4"]].map(([label, r, key]) =>
     [(cur === r ? "✓ " : "") + label, r === "wrong" ? "secondary danger-btn" : "secondary", key, () => {
       if (cur !== r) send(r);
-      if (r !== "sound") return next();
-      showAdded(fz.answers.get(it.idx));
-      speak(it.word);
-      inBook(r);
+      if (r === "sound") stay(r); else next();
     }]);
   const check = () => actions([  // 翻开核对：回看已判「认识」的卡时，点「对」不重复提交
     ["对，下一个", "", "1", () => { if (!before || before.result !== "known") send("known"); next(); }],
@@ -1484,7 +1504,9 @@ function renderFreqCard(fz) {
   if (!before) {
     actions([
       ["认识", "", "1", () => { reveal(); check(); }],
-      ["不会", "secondary danger-btn", "2", () => { reveal(); send("unknown"); showAdded(fz.answers.get(it.idx)); speak(it.word); inBook("unknown"); }],
+      ["不会", "secondary danger-btn", "2", () => { send("unknown"); stay("unknown"); }],
+      ["不会读音", "secondary", "3", () => { send("sound"); stay("sound"); }],
+      ["一词多义", "secondary", "4", () => { send("senses"); stay("senses"); }],
     ]);
   } else if (before.result === "known") {
     reveal();
@@ -1498,17 +1520,10 @@ function renderFreqCard(fz) {
   }
   $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(it.word); };
   bindSayEx(card);
-  bindFreqKeys((e) => {
-    if (!card.isConnected) return bindFreqKeys(null);
-    const tag = e.target.tagName;
-    if (e.repeat || e.metaKey || e.ctrlKey || e.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
-    const k = e.key === " " || e.key === "Enter" ? (tag === "BUTTON" ? "" : "1") : e.key;
-    const fn = k === "Escape" ? quit : k === "ArrowLeft" || k === "Backspace" ? prev : keys[k];
-    if (fn) { e.preventDefault(); fn(); }
-  });
+  bindCardKeys(card, (k) => (k === "Escape" ? quit : k === "ArrowLeft" || k === "Backspace" ? prev : keys[k]));
 }
 async function finishFreq(fz) {
-  bindFreqKeys(null);
+  bindCardKeys(null);
   view.innerHTML = `<div class="card"><p class="desc">保存中……</p></div>`;
   await Promise.allSettled(fz.pending);
   await within(flushFreqQueue(), 3000);  // 收尾前把没发出去的再补交一次
