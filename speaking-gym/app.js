@@ -1122,7 +1122,7 @@ async function renderWords(root) {
           <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
           ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}
           ${wordExchangesHtml(w)}
-          <div class="muted-sm">${w.date} · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累" }[w.source] || "手动添加"}${reasonsOf(w).map((r) => ` · ${FREQ_REASONS[r]}`).join("")} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
+          <div class="muted-sm">${w.date} · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累", related: "相关词" }[w.source] || "手动添加"}${reasonsOf(w).map((r) => ` · ${FREQ_REASONS[r]}`).join("")} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
             ${w.source !== "chat" && !(w.exchanges || []).length ? `<button class="link-btn word-ask" data-w="${esc(w.word)}">让 Buddy 讲讲这个词</button>` : ""}</div>
         </div>
         <button class="note-del word-del" data-id="${w.id}">删除</button>
@@ -1211,7 +1211,7 @@ function sensesHtml(senses, word, blank, forms) {
 }
 const bindSayEx = (root) => root.querySelectorAll(".say-ex").forEach((b) => { b.onclick = () => { b.blur(); speak(b.dataset.t); }; });
 const FORM_LABELS = { 3: "三单", p: "过去式", d: "过去分词", i: "-ing", s: "复数", r: "比较级", t: "最高级" };
-function relHtml(rel, word) {
+function relHtml(rel, word, pos = "") {
   const forms = [];
   for (const [k, f] of (rel && rel.forms) || []) {
     const same = forms.find((x) => x[0] === f);
@@ -1220,20 +1220,22 @@ function relHtml(rel, word) {
   const { syn = [], ant = [], fam = [], cmp = [] } = rel || {};
   if (!forms.length && !syn.length && !ant.length && !fam.length && !cmp.length) return "";
   const chip = (t, sub, cls = "") => `<button class="rel-chip say-ex ${cls}" data-t="${esc(t)}">${esc(t)}${sub ? `<small>${esc(sub)}</small>` : ""}</button>`;
+  const jump = (t, p, note, cls = "") => `<button class="rel-chip rel-jump ${cls}" data-w="${esc(t)}"><span>${esc(t)}${p ? `<i>${esc(p)}</i>` : ""}</span>${note ? `<small>${esc(note)}</small>` : ""}</button>`;
   const group = (label, chips, cls = "") => `<div class="rel-group ${cls}">${chips.length ? `<span class="rel-label">${label}</span>${chips.join("")}` : ""}</div>`;
   return `
-    <div class="rel">
+    <div class="rel" data-word="${esc(word)}">
       <button class="link-btn rel-toggle">相关词 · 词汇图 <span class="rel-arrow">▸</span> <kbd>5</kbd></button>
       <div class="rel-map hidden">
         ${forms.length ? group("词形", forms.map(([f, l]) => chip(f, l))) : ""}
         <div class="rel-mid">
-          ${group("反义", ant.map((w) => chip(w)), "rel-left")}
+          ${group("反义", ant.map((w) => jump(w, pos)), "rel-left")}
           <div class="rel-hub">${esc(word)}</div>
-          ${group("词族", fam.map(([w, p]) => chip(w, p)), "rel-right")}
+          ${group("词族", fam.map(([w, p]) => jump(w, p)), "rel-right")}
         </div>
         ${syn.length ? `<div class="rel-axis"><div class="rel-scale"><span>口语</span><span>中性</span><span>书面</span></div>
-          <div class="rel-cols">${["i", "n", "f"].map((r) => `<div>${syn.filter((s) => s[1] === r).map(([w, , n]) => chip(w, n, "rel-syn r-" + r)).join("")}</div>`).join("")}</div></div>` : ""}
-        ${cmp.length ? group("搭配 / 复合词", cmp.map((w) => chip(w))) : ""}
+          <div class="rel-cols">${["i", "n", "f"].map((r) => `<div>${syn.filter((s) => s[1] === r).map(([w, , n]) => jump(w, pos, n, "rel-syn r-" + r)).join("")}</div>`).join("")}</div></div>` : ""}
+        ${cmp.length ? group("搭配 / 复合词", cmp.map((w) => jump(w))) : ""}
+        <div class="muted-sm rel-hint">点相关词可以打开它的卡片</div>
       </div>
     </div>`;
 }
@@ -1242,7 +1244,68 @@ function bindRel(root) {
   if (!btn) return null;
   const toggle = () => { map.classList.toggle("hidden"); btn.querySelector(".rel-arrow").textContent = map.classList.contains("hidden") ? "▸" : "▾"; };
   btn.onclick = () => { btn.blur(); toggle(); };
+  root.querySelectorAll(".rel-jump").forEach((b) => { b.onclick = () => { b.blur(); openWordCard(b.dataset.w, b.closest(".rel").dataset.word); }; });
   return toggle;
+}
+let wordCardStack = [];
+function closeWordCard() {
+  const o = $("#wordCardOverlay");
+  if (o) o.remove();
+  wordCardStack = [];
+  window.removeEventListener("keydown", wordCardKeys, true);
+}
+function wordCardBack() {
+  wordCardStack.pop();
+  showWordCard(wordCardStack[wordCardStack.length - 1], true);
+}
+function wordCardKeys(e) {
+  if (!$("#wordCardOverlay")) return window.removeEventListener("keydown", wordCardKeys, true);
+  e.stopImmediatePropagation();
+  if (e.key === "Escape") { e.preventDefault(); closeWordCard(); }
+  else if ((e.key === "ArrowLeft" || e.key === "Backspace") && wordCardStack.length > 1) { e.preventDefault(); wordCardBack(); }
+}
+function openWordCard(word, from) {
+  if (!$("#wordCardOverlay")) {
+    document.body.insertAdjacentHTML("beforeend", `<div id="wordCardOverlay" class="wc-overlay"><div class="card wc-card" id="wordCardBox"><p class="desc">加载中……</p></div></div>`);
+    $("#wordCardOverlay").onclick = (e) => { if (e.target.id === "wordCardOverlay") closeWordCard(); };
+    window.addEventListener("keydown", wordCardKeys, true);
+  }
+  wordCardStack.push({ word, from });
+  showWordCard(wordCardStack[wordCardStack.length - 1]);
+}
+async function showWordCard(entry, back) {
+  const box = $("#wordCardBox");
+  let d;
+  try { d = entry.data || (entry.data = await api(`/api/freq/lookup?w=${encodeURIComponent(entry.word)}`)); }
+  catch (e) { box.innerHTML = `<p class="desc">加载失败：${esc(e.message)}</p>`; return; }
+  if (!box.isConnected || wordCardStack[wordCardStack.length - 1] !== entry) return;
+  const prevWord = wordCardStack.length > 1 ? wordCardStack[wordCardStack.length - 2].word : "";
+  box.innerHTML = `
+    <div class="wc-nav">${prevWord ? `<button class="link-btn" id="wcBack">← 返回 ${esc(prevWord)}</button>` : "<span></span>"}<button class="link-btn" id="wcClose">关闭 <kbd>Esc</kbd></button></div>
+    <div class="wc-head"><div class="flash-word">${esc(d.word)} <button class="link-btn" id="wcSay" style="font-size:22px">🔊</button></div>
+      ${d.phonetic ? `<div class="freq-ph">/${esc(d.phonetic)}/</div>` : ""}
+      <div class="muted-sm">${d.found ? `高频词第 ${(d.idx + 1).toLocaleString()} 个` : "高频词表里没有这个词（多半是词组或比较少见的词）"}${entry.from ? ` · 从 ${esc(entry.from)} 的词汇图点进来` : ""}</div></div>
+    ${d.found ? `<div class="word-reveal">${sensesHtml(d.senses, d.word)}
+      <div class="zh-under">${d.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>
+      ${relHtml(d.rel, d.word, (d.senses[0] || [])[0])}</div>` : ""}
+    <div style="margin-top:12px">${d.in_book ? `<span class="muted-sm">✓ 已在单词本里</span>` : `<button class="btn" id="wcAdd">加入单词本${d.found ? "" : "（AI 补释义）"}</button>`}</div>`;
+  bindSayEx(box);
+  const toggle = bindRel(box);
+  if (toggle) toggle();
+  $("#wcClose").onclick = closeWordCard;
+  if (prevWord) $("#wcBack").onclick = wordCardBack;
+  $("#wcSay").onclick = (e) => { e.currentTarget.blur(); speak(d.word); };
+  if (!back) speak(d.word);
+  const add = $("#wcAdd");
+  if (add) add.onclick = async () => {
+    add.disabled = true;
+    add.textContent = "加入中…";
+    try {
+      await api("/api/words", { json: { word: d.word, source: "related", parent: entry.from || "" } });
+      d.in_book = true;
+      add.outerHTML = `<span class="muted-sm">✓ 已加入单词本</span>`;
+    } catch (e) { add.disabled = false; add.textContent = "加入失败：" + e.message; }
+  };
 }
 const wordSenses = (w) => (w.senses && w.senses.length ? w.senses
   : w.meaning_en || w.example ? [["", w.meaning_en || "", ...(w.example ? [w.example] : [])]] : []);
@@ -1305,7 +1368,7 @@ function renderWordQuiz(quiz) {
     <div class="word-reveal">
       ${sensesHtml(senses, w.word)}
       <div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 18}px">${esc(w.meaning_zh || "（无中文释义）")}</div>
-      ${relHtml(w.rel, w.word)}
+      ${relHtml(w.rel, w.word, (senses[0] || [])[0])}
       ${wordExchangesHtml(w)}
     </div>`;
   if (mode === "flash") {
@@ -1508,7 +1571,7 @@ function renderFreqCard(fz) {
         <div id="freqBack" class="word-reveal hidden">
           ${sensesHtml(it.senses || [], it.word)}
           <div class="zh-under">${it.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>
-          ${relHtml(it.rel, it.word)}
+          ${relHtml(it.rel, it.word, ((it.senses || [])[0] || [])[0])}
           <div class="muted-sm" id="freqNote"></div>
         </div>
       </div>

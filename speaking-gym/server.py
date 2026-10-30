@@ -807,15 +807,32 @@ def freq_related():
     return (cached_json("freq_related.json") or {}).get("words") or {}
 
 
+def freq_index():
+    return {w[1]: i for i, w in enumerate(freq_words())}
+
+
+def freq_lookup(uid, word):
+    """点词汇图里的相关词：返回它在高频词表里的卡片数据（音标、中文、英文义项、相关词）和是否已在单词本。"""
+    idx = freq_index().get(word)
+    if idx is None:
+        return {"found": False, "word": word}
+    rank, w, phonetic, zh = freq_words()[idx]
+    with db() as c:
+        in_book = c.execute("SELECT 1 FROM vocab_words WHERE user_id=? AND word_key=?",
+                            (uid, word_key(w))).fetchone() is not None
+    return {"found": True, "idx": idx, "rank": rank, "word": w, "phonetic": phonetic, "zh": zh,
+            "senses": freq_defs().get(w) or [], "rel": freq_related().get(w) or {}, "in_book": in_book}
+
+
 FREQ_REASONS = {"unknown": "不会", "wrong": "认错意思", "sound": "不会读音", "senses": "一词多义"}
 
 
 def attach_freq_info(rows):
-    """高频词积累收进来的词：附上卡片上看过的英文义项、相关词和音标，复习时照样显示。"""
-    if any(r.get("source") == "freq" for r in rows):
+    """高频词积累（或从词汇图）收进来的词：附上卡片上看过的英文义项、相关词和音标，复习时照样显示。"""
+    if any(r.get("source") in ("freq", "related") for r in rows):
         defs, rel, phonetic = freq_defs(), freq_related(), {w[1]: w[2] for w in freq_words()}
         for r in rows:
-            if r.get("source") == "freq":
+            if r.get("source") in ("freq", "related"):
                 r["senses"], r["rel"], r["phonetic"] = (defs.get(r["word"]) or [], rel.get(r["word"]) or {},
                                                         phonetic.get(r["word"], ""))
 
@@ -1805,7 +1822,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self.fail("请输入一个英文单词或短语")
                 meaning_zh = str(d.get("meaning_zh") or "").strip()[:300]
                 meaning_en, example = "", ""
-                if (not meaning_zh or d.get("define")) and DEEPSEEK_KEY:
+                related = d.get("source") == "related"
+                idx = freq_index().get(word.lower()) if related else None
+                if idx is not None:
+                    _rank, word, _phonetic, meaning_zh = freq_words()[idx]
+                    senses = freq_defs().get(word) or []
+                    meaning_en, example = (senses[0][1], senses[0][2]) if senses else ("", "")
+                elif (not meaning_zh or d.get("define")) and DEEPSEEK_KEY:
                     try:
                         info = define_word(word)
                     except Exception as e:
@@ -1814,9 +1837,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if info:
                         word, meaning_en, example = info["word"], info["meaning_en"], info["example"]
                         meaning_zh = meaning_zh or info["meaning_zh"]
-                saved = upsert_word(user["id"], word, meaning_en, meaning_zh, example, source="manual")
+                saved = upsert_word(user["id"], word, meaning_en, meaning_zh, example,
+                                    source="related" if related else "manual",
+                                    context="相关词 · 从 %s 的词汇图点进来" % str(d.get("parent") or "")[:40] if related else "")
                 if not saved:
                     return self.fail("无法保存这个词")
+                if related and saved["new"]:
+                    with db() as c:
+                        c.execute("UPDATE vocab_words SET reason='unknown' WHERE id=?", (saved["id"],))
                 return self.send_json({"ok": True, **saved, "meaning_zh": meaning_zh, "meaning_en": meaning_en,
                                        "example": example})
             m = re.match(r"^/api/words/(\d+)/review$", p)
@@ -2087,6 +2115,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     except Exception:
                         r["exchanges"] = []
                 return self.send_json({"items": rows})
+            if p == "/api/freq/lookup":
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self.send_json(freq_lookup(user["id"], (q.get("w") or [""])[0].strip().lower()[:60]))
             if p == "/api/freq":
                 user = self.auth()
                 if not user:
