@@ -42,7 +42,8 @@ DEEPSEEK_KEY = CONFIG.get("deepseek_api_key") or os.environ.get("DEEPSEEK_API_KE
 QWEN_KEY = CONFIG.get("qwen_api_key") or CONFIG.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
 QWEN_BASE = CONFIG.get("qwen_base_url") or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 QWEN_VISION_MODEL = CONFIG.get("qwen_vision_model") or "qwen3.8-flash"
-DEEPSEEK_VISION_MODEL = CONFIG.get("deepseek_vision_model") or "deepseek-v4-flash-vision-exp"
+DEEPSEEK_MODEL = CONFIG.get("deepseek_model") or "deepseek-flash"
+DEEPSEEK_VISION_MODEL = CONFIG.get("deepseek_vision_model") or "deepseek-flash"
 # 视觉提供商：默认 deepseek（与文本共用一个账号）；配置 vision_provider="qwen" 可切回千问
 VISION_PROVIDER = (CONFIG.get("vision_provider") or ("deepseek" if DEEPSEEK_KEY else ("qwen" if QWEN_KEY else ""))).lower()
 ADMIN_TOKEN = CONFIG.get("admin_token") or os.environ.get("SG_ADMIN_TOKEN", "")
@@ -391,7 +392,8 @@ SCORE_SYSTEM = (
 
 
 def deepseek_call(messages, temperature=0.3, max_tokens=900, json_mode=True):
-    body = {"model": "deepseek-chat", "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+    body = {"model": DEEPSEEK_MODEL, "thinking": {"type": "disabled"}, "messages": messages,
+            "temperature": temperature, "max_tokens": max_tokens}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(
@@ -963,7 +965,7 @@ def reminders_loop():
             sys.stderr.write("reminders loop error: %s\n" % e)
 
 
-# ---------- 视觉模型（deepseek-v4-flash-vision-exp / qwen3.8-flash，可配置切换） ----------
+# ---------- 视觉模型（deepseek-flash / qwen3.8-flash，可配置切换） ----------
 def vision_describe(path, mime, caption):
     import base64
     with open(path, "rb") as f:
@@ -980,7 +982,7 @@ def vision_describe(path, mime, caption):
         url = "https://api.deepseek.com/chat/completions"
         key = DEEPSEEK_KEY
         body = {"model": DEEPSEEK_VISION_MODEL, "messages": [{"role": "user", "content": content}],
-                "max_tokens": 400, "thinking": {"type": "disabled"}}  # 实验版默认思考，必须显式关闭
+                "max_tokens": 400, "thinking": {"type": "disabled"}}  # deepseek-flash 默认开思考，必须显式关闭
     else:
         url = QWEN_BASE + "/chat/completions"
         key = QWEN_KEY
@@ -2557,6 +2559,7 @@ def main():
         print("Whisper: not installed, falling back to browser transcripts")
     threading.Thread(target=auto_organize_loop, daemon=True).start()
     threading.Thread(target=reminders_loop, daemon=True).start()
+    print("AI: %s" % (DEEPSEEK_MODEL if DEEPSEEK_KEY else "off"))
     print("Vision: %s" % ((VISION_PROVIDER + " / " + (DEEPSEEK_VISION_MODEL if VISION_PROVIDER == "deepseek" else QWEN_VISION_MODEL)) if vision_available() else "off"))
     print("Push: %s" % ("on" if push_available() else "off — pip3 install --user pywebpush"))
     handler = functools.partial(Handler, directory=BASE)
