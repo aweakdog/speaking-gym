@@ -590,7 +590,7 @@ DEFINE_WORD_SYSTEM = (
 )
 
 
-# ---------- 随代码部署的数据文件（topics.json / freq_words.json / freq_defs.json）：按修改时间缓存，更新后自动重载 ----------
+# ---------- 随代码部署的数据文件（topics.json / freq_words.json / freq_defs.json / freq_related.json）：按修改时间缓存，更新后自动重载 ----------
 _JSON_CACHE = {}
 
 
@@ -795,21 +795,27 @@ def freq_defs():
     return (cached_json("freq_defs.json") or {}).get("defs") or {}
 
 
+def freq_related():
+    """{word: {forms, syn, ant, fam, cmp}}：词形变化 + 近义 / 反义 / 词族 / 复合词，由 tools/build_freq_related.py 生成。"""
+    return (cached_json("freq_related.json") or {}).get("words") or {}
+
+
 FREQ_REASONS = {"unknown": "不会", "wrong": "认错意思", "sound": "不会读音", "senses": "一词多义"}
 
 
 def attach_freq_info(rows):
-    """高频词积累收进来的词：附上卡片上看过的英文义项和音标，复习时照样显示。"""
+    """高频词积累收进来的词：附上卡片上看过的英文义项、相关词和音标，复习时照样显示。"""
     if any(r.get("source") == "freq" for r in rows):
-        defs, phonetic = freq_defs(), {w[1]: w[2] for w in freq_words()}
+        defs, rel, phonetic = freq_defs(), freq_related(), {w[1]: w[2] for w in freq_words()}
         for r in rows:
             if r.get("source") == "freq":
-                r["senses"], r["phonetic"] = defs.get(r["word"]) or [], phonetic.get(r["word"], "")
+                r["senses"], r["rel"], r["phonetic"] = (defs.get(r["word"]) or [], rel.get(r["word"]) or {},
+                                                        phonetic.get(r["word"], ""))
 
 
 def freq_state(uid, n=0, start=0):
     """进度 + 从游标（或更靠后的 start：无尽模式从前端缓冲末尾续取）起的下 n 个词，单词本里已有的词直接跳过。"""
-    words, defs = freq_words(), freq_defs()
+    words, defs, rel = freq_words(), freq_defs(), freq_related()
     with db() as c:
         cursor = min(c.execute("SELECT freq_cursor FROM users WHERE id=?", (uid,)).fetchone()[0] or 0, len(words))
         added = c.execute("SELECT COUNT(*) FROM vocab_words WHERE user_id=? AND source='freq'", (uid,)).fetchone()[0]
@@ -821,7 +827,7 @@ def freq_state(uid, n=0, start=0):
         rank, word, phonetic, zh = words[i]
         if word_key(word) not in have:
             items.append({"idx": i, "rank": rank, "word": word, "phonetic": phonetic, "zh": zh,
-                          "senses": defs.get(word) or []})
+                          "senses": defs.get(word) or [], "rel": rel.get(word) or {}})
     return {"total": len(words), "cursor": cursor, "added": added, "items": items}
 
 

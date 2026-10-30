@@ -1195,20 +1195,55 @@ async function startWordQuiz(mode) {
   const quiz = { mode, items, idx: 0, tally: { know: 0, unsure: 0, forgot: 0 } };
   renderWordQuiz(quiz);
 }
-function blankOut(example, word) {
+function blankOut(example, word, forms = []) {
   if (!example) return "";
-  const re = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"), "ig");
-  const blanked = example.replace(re, "_____");
-  return blanked === example ? example.replace(new RegExp(word.split(/\s+/)[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\w*", "ig"), "_____") : blanked;
+  const pat = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  const all = [word, ...forms].filter(Boolean).sort((a, b) => b.length - a.length).map(pat).join("|");
+  const blanked = example.replace(new RegExp(`\\b(?:${all})\\b`, "ig"), "_____");
+  return blanked === example ? example.replace(new RegExp("\\b" + pat(word.split(/\s+/)[0]) + "\\w*", "ig"), "_____") : blanked;
 }
-function sensesHtml(senses, word, blank) {
+function sensesHtml(senses, word, blank, forms) {
   return senses.map(([pos, en, ...exs]) => `
     <div class="sense">
       ${en ? `<div class="word-en">${pos ? `<span class="pos">${esc(pos)}</span>` : ""}${esc(en)}</div>` : ""}
-      ${exs.map((x) => `<div class="word-ex">${blank ? esc(blankOut(x, word)) : `${esc(x)} <button class="link-btn say-ex" data-t="${esc(x)}">🔊</button>`}</div>`).join("")}
+      ${exs.map((x) => `<div class="word-ex">${blank ? esc(blankOut(x, word, forms)) : `${esc(x)} <button class="link-btn say-ex" data-t="${esc(x)}">🔊</button>`}</div>`).join("")}
     </div>`).join("");
 }
 const bindSayEx = (root) => root.querySelectorAll(".say-ex").forEach((b) => { b.onclick = () => { b.blur(); speak(b.dataset.t); }; });
+const FORM_LABELS = { 3: "三单", p: "过去式", d: "过去分词", i: "-ing", s: "复数", r: "比较级", t: "最高级" };
+function relHtml(rel, word) {
+  const forms = [];
+  for (const [k, f] of (rel && rel.forms) || []) {
+    const same = forms.find((x) => x[0] === f);
+    if (same) same[1] += "·" + FORM_LABELS[k]; else forms.push([f, FORM_LABELS[k]]);
+  }
+  const { syn = [], ant = [], fam = [], cmp = [] } = rel || {};
+  if (!forms.length && !syn.length && !ant.length && !fam.length && !cmp.length) return "";
+  const chip = (t, sub, cls = "") => `<button class="rel-chip say-ex ${cls}" data-t="${esc(t)}">${esc(t)}${sub ? `<small>${esc(sub)}</small>` : ""}</button>`;
+  const group = (label, chips, cls = "") => `<div class="rel-group ${cls}">${chips.length ? `<span class="rel-label">${label}</span>${chips.join("")}` : ""}</div>`;
+  return `
+    <div class="rel">
+      <button class="link-btn rel-toggle">相关词 · 词汇图 <span class="rel-arrow">▸</span> <kbd>5</kbd></button>
+      <div class="rel-map hidden">
+        ${forms.length ? group("词形", forms.map(([f, l]) => chip(f, l))) : ""}
+        <div class="rel-mid">
+          ${group("反义", ant.map((w) => chip(w)), "rel-left")}
+          <div class="rel-hub">${esc(word)}</div>
+          ${group("词族", fam.map(([w, p]) => chip(w, p)), "rel-right")}
+        </div>
+        ${syn.length ? `<div class="rel-axis"><div class="rel-scale"><span>口语</span><span>中性</span><span>书面</span></div>
+          <div class="rel-cols">${["i", "n", "f"].map((r) => `<div>${syn.filter((s) => s[1] === r).map(([w, , n]) => chip(w, n, "rel-syn r-" + r)).join("")}</div>`).join("")}</div></div>` : ""}
+        ${cmp.length ? group("搭配 / 复合词", cmp.map((w) => chip(w))) : ""}
+      </div>
+    </div>`;
+}
+function bindRel(root) {
+  const btn = root.querySelector(".rel-toggle"), map = root.querySelector(".rel-map");
+  if (!btn) return null;
+  const toggle = () => { map.classList.toggle("hidden"); btn.querySelector(".rel-arrow").textContent = map.classList.contains("hidden") ? "▸" : "▾"; };
+  btn.onclick = () => { btn.blur(); toggle(); };
+  return toggle;
+}
 const wordSenses = (w) => (w.senses && w.senses.length ? w.senses
   : w.meaning_en || w.example ? [["", w.meaning_en || "", ...(w.example ? [w.example] : [])]] : []);
 function renderWordQuiz(quiz) {
@@ -1247,12 +1282,14 @@ function renderWordQuiz(quiz) {
     renderWordQuiz(quiz);
   };
   const senses = wordSenses(w), hasEn = senses.some((s) => s[1]);
+  const forms = ((w.rel && w.rel.forms) || []).map((f) => f[1]);
   const reason = w.source === "freq" && FREQ_REASONS[w.reason];
   const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span>${reason ? `<span class="reason-tag">${reason}</span>` : ""}`;
   const detail = `
     <div class="word-reveal">
       ${sensesHtml(senses, w.word)}
       <div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 18}px">${esc(w.meaning_zh || "（无中文释义）")}</div>
+      ${relHtml(w.rel, w.word)}
       ${wordExchangesHtml(w)}
     </div>`;
   if (mode === "flash") {
@@ -1269,10 +1306,11 @@ function renderWordQuiz(quiz) {
           <button class="btn" id="btnFlip">翻开看释义 <kbd>空格</kbd></button>
           <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
         </div>
-        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了，Esc = 退出</div>
+        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了，5 = 相关词，Esc = 退出</div>
       </div>`;
     $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(w.word); };
     bindSayEx(view);
+    const toggleRel = bindRel(view);
     $("#btnQuizQuit").onclick = quit;
     const flip = () => {
       $("#flashBack").classList.remove("hidden");
@@ -1281,7 +1319,7 @@ function renderWordQuiz(quiz) {
         <button class="btn" id="gKnow">认识 ✓ <kbd>1</kbd></button>
         <button class="btn secondary" id="gUnsure">模糊 <kbd>2</kbd></button>
         <button class="btn secondary danger-btn" id="gForgot">忘了 ✗ <kbd>3</kbd></button>`;
-      keys = { "1": () => grade("know"), "2": () => grade("unsure"), "3": () => grade("forgot") };
+      keys = { "1": () => grade("know"), "2": () => grade("unsure"), "3": () => grade("forgot"), "5": toggleRel };
       $("#gKnow").onclick = keys["1"];
       $("#gUnsure").onclick = keys["2"];
       $("#gForgot").onclick = keys["3"];
@@ -1295,7 +1333,7 @@ function renderWordQuiz(quiz) {
     <div class="card">
       ${tag("看义写词")}
       <div class="flashcard">
-        ${sensesHtml(senses, w.word, true)}
+        ${sensesHtml(senses, w.word, true, forms)}
         ${w.meaning_zh || !hasEn ? `<div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 20}px">${esc(w.meaning_zh || "（无释义）")}</div>` : ""}
         <div class="word-add" style="margin-top:12px">
           <input id="recallInput" placeholder="写出这个英文单词/短语，回车提交；想不起来直接回车看答案" autocomplete="off" autocapitalize="off">
@@ -1449,11 +1487,12 @@ function renderFreqCard(fz) {
         <div id="freqBack" class="word-reveal hidden">
           ${sensesHtml(it.senses || [], it.word)}
           <div class="zh-under">${it.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>
+          ${relHtml(it.rel, it.word)}
           <div class="muted-sm" id="freqNote"></div>
         </div>
       </div>
       <div style="margin-top:14px" id="freqActions"></div>
-      <div class="muted-sm kbd-tip">键盘：1 或空格 = 认识 / 对 / 下一个，2 = 不会 / 认错意思，3 = 不会读音，4 = 一词多义，← = 上一个，Esc = 结束</div>
+      <div class="muted-sm kbd-tip">键盘：1 或空格 = 认识 / 对 / 下一个，2 = 不会 / 认错意思，3 = 不会读音，4 = 一词多义，5 = 相关词，← = 上一个，Esc = 结束</div>
     </div>`;
   const card = $("#freqCard"), noteEl = $("#freqNote");
   let keys = {}, stamp = 0;
@@ -1520,7 +1559,9 @@ function renderFreqCard(fz) {
   }
   $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(it.word); };
   bindSayEx(card);
-  bindCardKeys(card, (k) => (k === "Escape" ? quit : k === "ArrowLeft" || k === "Backspace" ? prev : keys[k]));
+  const toggleRel = bindRel(card);
+  bindCardKeys(card, (k) => (k === "Escape" ? quit : k === "ArrowLeft" || k === "Backspace" ? prev
+    : k === "5" ? (!$("#freqBack").classList.contains("hidden") && toggleRel) : keys[k]));
 }
 async function finishFreq(fz) {
   bindCardKeys(null);

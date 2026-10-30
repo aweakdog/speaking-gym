@@ -112,12 +112,12 @@ def parse_senses(word, raw):
     return out, len(examples) >= 2 and all(uses(word, x) for x in examples)
 
 
-def ask(key, batch):
-    """batch: [(word, zh)] → {word: (义项, 是否合格)}。"""
+def request_items(key, system, batch, per_word):
+    """把 batch: [(word, zh)] 发给 DeepSeek，返回 JSON 里的 items 列表。"""
     req = urllib.request.Request("https://api.deepseek.com/chat/completions", data=json.dumps({
         "model": "deepseek-flash", "thinking": {"type": "disabled"}, "temperature": 0.7,
-        "max_tokens": 400 + 160 * len(batch), "response_format": {"type": "json_object"},
-        "messages": [{"role": "system", "content": SYSTEM},
+        "max_tokens": 400 + per_word * len(batch), "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": "\n".join("%s | %s" % wz for wz in batch)}],
     }).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
     for attempt in range(3):  # 限流、超时、断线：等一会儿再试
@@ -138,10 +138,14 @@ def ask(key, batch):
     with LOCK:
         USAGE["in"] += usage.get("prompt_tokens") or 0
         USAGE["out"] += usage.get("completion_tokens") or 0
+    items = json.loads(resp["choices"][0]["message"]["content"]).get("items") or []
+    return [it for it in items if isinstance(it, dict)]
+
+
+def ask(key, batch):
+    """batch: [(word, zh)] → {word: (义项, 是否合格)}。"""
     want, out = {w for w, _ in batch}, {}
-    for it in json.loads(resp["choices"][0]["message"]["content"]).get("items") or []:
-        if not isinstance(it, dict):
-            continue
+    for it in request_items(key, SYSTEM, batch, 160):
         w = str(it.get("word") or "").strip().lower()
         senses, ok = parse_senses(w, it.get("senses"))
         if w in want and senses:
@@ -149,8 +153,8 @@ def ask(key, batch):
     return out
 
 
-def run(key, batches, workers):
-    """并发请求，按完成先后逐批产出 (结果, 异常)；守护线程，Ctrl+C 立刻能停。"""
+def run(fn, batches, workers):
+    """并发调用 fn(batch)，按完成先后逐批产出 (结果, 异常)；守护线程，Ctrl+C 立刻能停。"""
     todo, done = queue.Queue(), queue.Queue()
     for b in batches:
         todo.put(b)
@@ -162,7 +166,7 @@ def run(key, batches, workers):
             except queue.Empty:
                 return
             try:
-                done.put((ask(key, b), None))
+                done.put((fn(b), None))
             except Exception as e:
                 done.put((None, e))
 
@@ -172,16 +176,18 @@ def run(key, batches, workers):
         yield done.get()
 
 
-def save(path, defs, order):
+DEFS_HEAD = {"source": "DeepSeek (deepseek-flash) via tools/build_freq_defs.py, from the Chinese senses in "
+                       "freq_words.json", "fields": ["senses: [pos, definition, example, ...]"]}
+
+
+def save(path, defs, order, head=DEFS_HEAD, field="defs"):
     keys = [w for w in order if w in defs]
     keys += sorted(set(defs) - set(keys))  # 词表里已经没有的词也留着，以后换回来不用重新生成
-    head = json.dumps({"source": "DeepSeek (deepseek-flash) via tools/build_freq_defs.py, from the Chinese senses in "
-                                 "freq_words.json", "fields": ["senses: [pos, definition, example, ...]"]})
     body = ",\n".join("%s:%s" % (json.dumps(w), json.dumps(defs[w], ensure_ascii=False, separators=(",", ":")))
                       for w in keys)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:  # 每词一行，git diff 友好；先写临时文件再替换，中途打断也不会写坏
-        f.write(head[:-1] + ', "defs": {\n' + body + "\n}}\n")
+        f.write(json.dumps(head)[:-1] + ', "%s": {\n' % field + body + "\n}}\n")
     os.replace(tmp, path)
 
 
@@ -214,7 +220,7 @@ def main():
                 break
             batches = [todo[i:i + size] for i in range(0, len(todo), size)]
             print("每批 %d 个词，共 %d 批" % (size, len(batches)))
-            for n, (res, err) in enumerate(run(key, batches, args.workers), 1):
+            for n, (res, err) in enumerate(run(lambda b: ask(key, b), batches, args.workers), 1):
                 if isinstance(err, Fatal):
                     raise err
                 if err:

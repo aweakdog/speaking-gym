@@ -14,6 +14,7 @@
   - 单词本：对话中问到的生词自动收录 + 高频词积累（按 COCA 词频从高到低过词，不会/认错的自动入本，认错时标明原因：认错意思 / 不会读音 / 一词多义）+ 间隔复习
     - 高频词表 `speaking-gym/freq_words.json` 由 `tools/build_freq_words.py` 从 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT License）生成，许可声明随文件附带
     - 背词卡片先给英文义项和口语例句、再给中文，练英文思维；高频词常用的 1-3 个英文义项（词性 + 释义 + 例句）`speaking-gym/freq_defs.json` 由 `tools/build_freq_defs.py` 调 DeepSeek 离线生成（可断点续跑；词表重新生成后再跑一次即可补齐新词）
+    - 卡片翻开后可展开「相关词 · 词汇图」（快捷键 5）：词形变化、反义词、词族、按口语 → 书面排开的近义词、搭配 / 复合词；数据 `speaking-gym/freq_related.json` 由 `tools/build_freq_related.py` 生成（词形取自 ECDICT，其余调 DeepSeek）
 
 ## 部署
 
