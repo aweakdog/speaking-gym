@@ -584,7 +584,7 @@ DEFINE_WORD_SYSTEM = (
 )
 
 
-# ---------- 随代码部署的数据文件（topics.json / freq_words.json）：按修改时间缓存，更新后自动重载 ----------
+# ---------- 随代码部署的数据文件（topics.json / freq_words.json / freq_defs.json）：按修改时间缓存，更新后自动重载 ----------
 _JSON_CACHE = {}
 
 
@@ -784,9 +784,14 @@ def freq_words():
     return (cached_json("freq_words.json") or {}).get("words") or []
 
 
+def freq_defs():
+    """{word: [en, ex]}：高频词的英文释义 + 口语例句，由 tools/build_freq_defs.py 调 DeepSeek 离线生成。"""
+    return (cached_json("freq_defs.json") or {}).get("defs") or {}
+
+
 def freq_state(uid, n=0, start=0):
     """进度 + 从游标（或更靠后的 start：无尽模式从前端缓冲末尾续取）起的下 n 个词，单词本里已有的词直接跳过。"""
-    words = freq_words()
+    words, defs = freq_words(), freq_defs()
     with db() as c:
         cursor = min(c.execute("SELECT freq_cursor FROM users WHERE id=?", (uid,)).fetchone()[0] or 0, len(words))
         added = c.execute("SELECT COUNT(*) FROM vocab_words WHERE user_id=? AND source='freq'", (uid,)).fetchone()[0]
@@ -797,7 +802,8 @@ def freq_state(uid, n=0, start=0):
             break
         rank, word, phonetic, zh = words[i]
         if word_key(word) not in have:
-            items.append({"idx": i, "rank": rank, "word": word, "phonetic": phonetic, "zh": zh})
+            en, ex = defs.get(word) or ("", "")
+            items.append({"idx": i, "rank": rank, "word": word, "phonetic": phonetic, "zh": zh, "en": en, "ex": ex})
     return {"total": len(words), "cursor": cursor, "added": added, "items": items}
 
 
@@ -813,15 +819,17 @@ def freq_answer(uid, idx, result):
                       (uid, word_key(word)))
     saved = None
     if result != "known":
-        saved = upsert_word(uid, word, meaning_zh=zh, source="freq", context="高频词第 %d 个（COCA #%d）· %s" % (
-            idx + 1, rank, "不会" if result == "unknown" else "认错了"))
-        if saved and saved["new"] and DEEPSEEK_KEY:
+        en, ex = freq_defs().get(word) or ("", "")
+        saved = upsert_word(uid, word, meaning_en=en, meaning_zh=zh, example=ex, source="freq",
+                            context="高频词第 %d 个（COCA #%d）· %s" % (
+                                idx + 1, rank, "不会" if result == "unknown" else "认错了"))
+        if saved and saved["new"] and DEEPSEEK_KEY and not (en and ex):
             threading.Thread(target=enrich_word, args=(saved["id"], word), daemon=True).start()
     return {"ok": True, "saved": saved}
 
 
 def enrich_word(wid, word):
-    """高频词入本时只有词典的中文释义：后台让 AI 补上英文释义和例句（复习翻卡、拼写填空都用得上）。"""
+    """高频词入本时 freq_defs.json 里还没有它的英文释义和例句：后台让 AI 补上（复习翻卡、拼写填空都用得上）。"""
     try:
         info = define_word(word)
         if info:

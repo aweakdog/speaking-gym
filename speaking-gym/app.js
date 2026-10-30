@@ -1233,9 +1233,9 @@ function renderWordQuiz(quiz) {
   };
   const detail = `
     <div class="word-reveal">
-      <div class="word-zh" style="font-size:18px">${esc(w.meaning_zh || "（无中文释义）")}</div>
-      ${w.meaning_en ? `<div class="muted-sm" style="margin-top:4px">${esc(w.meaning_en)}</div>` : ""}
-      ${w.example ? `<div class="word-ex" style="margin-top:8px">${esc(w.example)}</div>` : ""}
+      ${w.meaning_en ? `<div class="word-en" style="font-size:18px">${esc(w.meaning_en)}</div>` : ""}
+      ${w.example ? `<div class="word-ex">${esc(w.example)} <button class="link-btn" id="btnSayEx">🔊</button></div>` : ""}
+      <div class="word-zh zh-under" style="font-size:${w.meaning_en ? 15 : 18}px">${esc(w.meaning_zh || "（无中文释义）")}</div>
       ${wordExchangesHtml(w)}
     </div>`;
   if (mode === "flash") {
@@ -1253,6 +1253,7 @@ function renderWordQuiz(quiz) {
         </div>
       </div>`;
     $("#btnSay").onclick = () => speak(w.word);
+    if (w.example) $("#btnSayEx").onclick = () => speak(w.example);
     $("#btnQuizQuit").onclick = () => { memSub = "words"; renderMemory(); };
     $("#btnFlip").onclick = () => {
       $("#flashBack").classList.remove("hidden");
@@ -1270,9 +1271,9 @@ function renderWordQuiz(quiz) {
     <div class="card">
       <span class="step-tag">单词复习 · 看义写词 · ${progress}</span>
       <div class="flashcard">
-        <div class="word-zh" style="font-size:20px">${esc(w.meaning_zh || w.meaning_en || "（无释义）")}</div>
-        ${w.meaning_zh && w.meaning_en ? `<div class="muted-sm" style="margin-top:4px">${esc(w.meaning_en)}</div>` : ""}
-        ${w.example ? `<div class="word-ex" style="margin-top:8px">${esc(blankOut(w.example, w.word))}</div>` : ""}
+        ${w.meaning_en ? `<div class="word-en" style="font-size:20px">${esc(w.meaning_en)}</div>` : ""}
+        ${w.example ? `<div class="word-ex">${esc(blankOut(w.example, w.word))}</div>` : ""}
+        ${w.meaning_zh || !w.meaning_en ? `<div class="word-zh zh-under" style="font-size:${w.meaning_en ? 15 : 20}px">${esc(w.meaning_zh || "（无释义）")}</div>` : ""}
         <div class="word-add" style="margin-top:12px">
           <input id="recallInput" placeholder="写出这个英文单词/短语，回车提交" autocomplete="off" autocapitalize="off">
           <button class="btn" id="btnRecallCheck">检查</button>
@@ -1410,7 +1411,9 @@ function renderFreqCard(fz) {
         ${it.phonetic ? `<div class="freq-ph">/${esc(it.phonetic)}/</div>` : ""}
         <div class="muted-sm" id="freqHint">认识的话先在心里说出意思，再点「认识」翻开核对</div>
         <div id="freqBack" class="word-reveal hidden">
-          ${it.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}
+          ${it.en ? `<div class="word-en">${esc(it.en)}</div>` : ""}
+          ${it.ex ? `<div class="word-ex">${esc(it.ex)} <button class="link-btn" id="btnSayEx">🔊</button></div>` : ""}
+          <div class="zh-under">${it.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>
           <div class="muted-sm" id="freqNote"></div>
         </div>
       </div>
@@ -1472,6 +1475,7 @@ function renderFreqCard(fz) {
     inBook();
   }
   $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(it.word); };
+  if (it.ex) $("#btnSayEx").onclick = (e) => { e.currentTarget.blur(); speak(it.ex); };
   bindFreqKeys((e) => {
     if (!card.isConnected) return bindFreqKeys(null);
     const tag = e.target.tagName;

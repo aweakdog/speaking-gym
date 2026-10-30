@@ -225,6 +225,11 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .flashcard { background: var(--accent-soft); border-radius: 16px; padding: 28px 22px; text-align: center; margin-top: 12px; }
 .flash-word { font-size: 34px; font-weight: 800; letter-spacing: 0.3px; margin-bottom: 8px; }
 .word-reveal { margin-top: 16px; padding-top: 14px; border-top: 1px dashed rgba(0,0,0,0.12); text-align: left; }
+.word-en { font-size: 16px; line-height: 1.55; }
+.word-en + .word-ex { margin-top: 6px; }
+.zh-under { margin-top: 10px; }
+.zh-under:first-child { margin-top: 0; }
+.zh-under:not(:first-child) .freq-zh { font-size: 15px; }
 
 /* 高频词积累 */
 .freq-panel { background: #f8faf9; border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin: 4px 0 16px; }
