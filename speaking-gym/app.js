@@ -1122,7 +1122,7 @@ async function renderWords(root) {
           <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
           ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}
           ${wordExchangesHtml(w)}
-          <div class="muted-sm">${w.date} · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累" }[w.source] || "手动添加"}${w.source === "freq" && FREQ_REASONS[w.reason] ? ` · ${FREQ_REASONS[w.reason]}` : ""} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
+          <div class="muted-sm">${w.date} · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累" }[w.source] || "手动添加"}${reasonsOf(w).map((r) => ` · ${FREQ_REASONS[r]}`).join("")} · 复习 ${w.reviews} 次 · ${wordDueLabel(w, d.now)}
             ${w.source !== "chat" && !(w.exchanges || []).length ? `<button class="link-btn word-ask" data-w="${esc(w.word)}">让 Buddy 讲讲这个词</button>` : ""}</div>
         </div>
         <button class="note-del word-del" data-id="${w.id}">删除</button>
@@ -1273,18 +1273,34 @@ function renderWordQuiz(quiz) {
   const w = items[idx];
   const progress = `${idx + 1} / ${items.length}`;
   let graded = false, keys = {};
-  const grade = async (result) => {
+  const grade = async (result, reasons = []) => {
     if (graded) return;
     graded = true;
     tally[result]++;
-    try { await api(`/api/words/${w.id}/review`, { json: { result } }); } catch (_) {}
+    try { await api(`/api/words/${w.id}/review`, { json: { result, reasons } }); } catch (_) {}
     quiz.idx++;
     renderWordQuiz(quiz);
   };
   const senses = wordSenses(w), hasEn = senses.some((s) => s[1]);
   const forms = ((w.rel && w.rel.forms) || []).map((f) => f[1]);
-  const reason = w.source === "freq" && FREQ_REASONS[w.reason];
-  const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span>${reason ? `<span class="reason-tag">${reason}</span>` : ""}`;
+  const had = reasonsOf(w);
+  const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span><span id="reasonTags">${reasonTags(had)}</span>`;
+  const pickReasons = (result, el, label) => {
+    const added = new Set();
+    const toggle = (r) => { if (!had.includes(r)) { if (added.has(r)) added.delete(r); else added.add(r); render(); } };
+    const render = () => {
+      $("#reasonTags").innerHTML = reasonTags(Object.keys(FREQ_REASONS).filter((r) => had.includes(r) || added.has(r)));
+      el.innerHTML = `<div class="muted-sm">${label}：顺手标一下原因（可多选，会和之前的合并），没有就直接下一个</div>`
+        + REVIEW_REASONS.map(([name, r, key]) => {
+          const on = had.includes(r) || added.has(r);
+          return `<button class="btn secondary${on ? " danger-btn" : ""}" data-r="${r}" ${had.includes(r) ? "disabled" : ""}>${on ? "✓ " : ""}${name} <kbd>${key}</kbd></button>`;
+        }).join("") + `<button class="btn" id="gReasonNext">下一个 → <kbd>1</kbd></button>`;
+      el.querySelectorAll("[data-r]").forEach((b) => { b.onclick = () => toggle(b.dataset.r); });
+      $("#gReasonNext").onclick = keys["1"];
+    };
+    keys = { ...keys, "1": () => grade(result, [...added]), "2": () => toggle("wrong"), "3": () => toggle("sound"), "4": () => toggle("senses") };
+    render();
+  };
   const detail = `
     <div class="word-reveal">
       ${sensesHtml(senses, w.word)}
@@ -1306,7 +1322,7 @@ function renderWordQuiz(quiz) {
           <button class="btn" id="btnFlip">翻开看释义 <kbd>空格</kbd></button>
           <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
         </div>
-        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了，5 = 相关词，Esc = 退出</div>
+        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了（之后 2 / 3 / 4 补标原因，1 = 下一个），5 = 相关词，Esc = 退出</div>
       </div>`;
     $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(w.word); };
     bindSayEx(view);
@@ -1314,12 +1330,13 @@ function renderWordQuiz(quiz) {
     $("#btnQuizQuit").onclick = quit;
     const flip = () => {
       $("#flashBack").classList.remove("hidden");
-      if (w.reason === "sound") speak(w.word);
+      if (had.includes("sound")) speak(w.word);
       $("#flashActions").innerHTML = `
         <button class="btn" id="gKnow">认识 ✓ <kbd>1</kbd></button>
         <button class="btn secondary" id="gUnsure">模糊 <kbd>2</kbd></button>
         <button class="btn secondary danger-btn" id="gForgot">忘了 ✗ <kbd>3</kbd></button>`;
-      keys = { "1": () => grade("know"), "2": () => grade("unsure"), "3": () => grade("forgot"), "5": toggleRel };
+      keys = { "1": () => grade("know"), "2": () => pickReasons("unsure", $("#flashActions"), "模糊"),
+        "3": () => pickReasons("forgot", $("#flashActions"), "忘了"), "5": toggleRel };
       $("#gKnow").onclick = keys["1"];
       $("#gUnsure").onclick = keys["2"];
       $("#gForgot").onclick = keys["3"];
@@ -1345,7 +1362,7 @@ function renderWordQuiz(quiz) {
         <button class="btn ghost" id="btnRecallReveal">想不起来，看答案</button>
         <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
       </div>
-      <div class="muted-sm kbd-tip">键盘：回车 = 检查（空着回车 = 看答案），看完答案后回车 / 1 = 下一个，Esc = 退出</div>
+      <div class="muted-sm kbd-tip">键盘：回车 = 检查（空着回车 = 看答案），答错后 2 / 3 / 4 补标原因，回车 / 1 = 下一个，Esc = 退出</div>
     </div>`;
   const input = $("#recallInput");
   input.focus();
@@ -1364,9 +1381,10 @@ function renderWordQuiz(quiz) {
       </div>`;
     $("#btnSay2").onclick = (e) => { e.currentTarget.blur(); speak(w.word); };
     speak(w.word);
-    $("#recallActions").innerHTML = `<button class="btn" id="gNext">${ok ? "下一个 →" : "记住了，下一个 →"} <kbd>1</kbd></button>
+    if (!ok) return pickReasons("forgot", $("#recallActions"), typed ? "拼错了" : "没想起来");
+    $("#recallActions").innerHTML = `<button class="btn" id="gNext">下一个 → <kbd>1</kbd></button>
       <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>`;
-    keys = { "1": () => grade(ok ? "know" : "forgot") };
+    keys = { "1": () => grade("know") };
     $("#gNext").onclick = keys["1"];
     $("#btnQuizQuit").onclick = quit;
     $("#gNext").focus();
@@ -1388,6 +1406,9 @@ function renderWordQuiz(quiz) {
 /* ---- 高频词积累：按 COCA 词频从高到低过词，不会 / 认错了的词自动进单词本 ---- */
 const FREQ_BATCH = 20;
 const FREQ_REASONS = { unknown: "不会", wrong: "认错意思", sound: "不会读音", senses: "一词多义" };
+const REVIEW_REASONS = [["认错意思", "wrong", "2"], ["不会读音", "sound", "3"], ["一词多义", "senses", "4"]];
+const reasonsOf = (w) => (w.reason || "").split(",").filter((r) => FREQ_REASONS[r]);
+const reasonTags = (rs) => rs.map((r) => `<span class="reason-tag">${FREQ_REASONS[r]}</span>`).join("");
 function freqPanelHtml(fq) {
   if (!fq || !fq.total) return "";
   const done = fq.cursor >= fq.total;

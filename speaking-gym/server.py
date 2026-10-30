@@ -740,7 +740,13 @@ def define_word(word):
     }
 
 
-def apply_review(uid, wid, result):
+def merge_reasons(old, new):
+    """入本原因是集合（逗号分隔）：复习时补标的并进去，按 不会 / 认错意思 / 不会读音 / 一词多义 的顺序存。"""
+    have = set((old or "").split(",")) | set(new)
+    return ",".join(r for r in FREQ_REASONS if r in have) or None
+
+
+def apply_review(uid, wid, result, reasons=()):
     now = int(time.time())
     with db() as c:
         row = c.execute("SELECT * FROM vocab_words WHERE id=? AND user_id=?", (wid, uid)).fetchone()
@@ -755,11 +761,12 @@ def apply_review(uid, wid, result):
         else:
             streak = 0
             due = now + 6 * 3600
+        reason = merge_reasons(row["reason"], reasons)
         c.execute(
-            "UPDATE vocab_words SET reviews=reviews+1, correct=correct+?, streak=?, due=?, last_reviewed=? WHERE id=?",
-            (1 if result == "know" else 0, streak, due, now, wid),
+            "UPDATE vocab_words SET reviews=reviews+1, correct=correct+?, streak=?, due=?, last_reviewed=?, reason=? "
+            "WHERE id=?", (1 if result == "know" else 0, streak, due, now, reason, wid),
         )
-        return {"id": wid, "streak": streak, "due": due}
+        return {"id": wid, "streak": streak, "due": due, "reason": reason}
 
 
 def pick_quiz_words(uid, n):
@@ -849,7 +856,7 @@ def freq_answer(uid, idx, result):
                             example=senses[0][2] if senses else "", source="freq", context=context)
         if saved:
             with db() as c:
-                c.execute("UPDATE vocab_words SET reason=?, context=? WHERE id=? AND source='freq'",
+                c.execute("UPDATE vocab_words SET reason=?, context=? WHERE id=? AND source='freq' AND reviews=0",
                           (result, context, saved["id"]))
         if saved and saved["new"] and DEEPSEEK_KEY and not senses:
             threading.Thread(target=enrich_word, args=(saved["id"], word), daemon=True).start()
@@ -1817,10 +1824,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 user = self.auth()
                 if not user:
                     return self.fail("unauthorized", 401)
-                result = self.body_json().get("result")
+                d = self.body_json()
+                result, reasons = d.get("result"), d.get("reasons")
                 if result not in ("know", "unsure", "forgot"):
                     return self.fail("bad result")
-                out = apply_review(user["id"], int(m.group(1)), result)
+                reasons = [r for r in reasons if r in FREQ_REASONS] if isinstance(reasons, list) else []
+                out = apply_review(user["id"], int(m.group(1)), result, reasons)
                 return self.send_json(out) if out else self.fail("not found", 404)
             if p == "/api/freq/answer":
                 user = self.auth()
