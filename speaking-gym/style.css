@@ -262,6 +262,8 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .wc-nav { display: flex; justify-content: space-between; align-items: center; }
 .wc-nav kbd { font-family: inherit; font-size: 11px; opacity: 0.7; margin-left: 4px; padding: 0 5px; border: 1px solid currentColor; border-radius: 4px; }
 .wc-head { text-align: center; }
+.quiz-prev { margin-left: 8px; }
+.quiz-prev kbd { font-family: inherit; font-size: 11px; opacity: 0.7; margin-left: 4px; padding: 0 5px; border: 1px solid currentColor; border-radius: 4px; }
 .rel-syn.r-i { background: #fff3e3; border-color: #f6d3a6; }
 .rel-syn.r-n { background: #f3f5f4; }
 .rel-syn.r-f { background: #e9f0fc; border-color: #c4d4f3; }
@@ -283,7 +285,7 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .word-head .freq-ph { font-size: 13px; margin: 0; }
 .freq-zh { font-size: 16px; line-height: 1.75; }
 .btn kbd { font-family: inherit; font-size: 11px; font-weight: 600; opacity: 0.7; margin-left: 4px; padding: 0 5px; border: 1px solid currentColor; border-radius: 4px; }
-@media (hover: none) { .btn kbd, .kbd-tip, .rel-toggle kbd { display: none; } }
+@media (hover: none) { .btn kbd, .kbd-tip, .rel-toggle kbd, .quiz-prev kbd { display: none; } }
 
 /* 词汇量测试 */
 .vocab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 8px; margin-top: 12px; }

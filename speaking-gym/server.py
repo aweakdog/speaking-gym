@@ -1847,6 +1847,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         c.execute("UPDATE vocab_words SET reason='unknown' WHERE id=?", (saved["id"],))
                 return self.send_json({"ok": True, **saved, "meaning_zh": meaning_zh, "meaning_en": meaning_en,
                                        "example": example})
+            m = re.match(r"^/api/words/(\d+)/unreview$", p)
+            if m:
+                user = self.auth()
+                if not user:
+                    return self.fail("unauthorized", 401)
+                d = self.body_json()
+                try:
+                    state = [max(0, int(d.get(k) or 0)) for k in ("reviews", "correct", "streak", "due")]
+                    last = int(d["last_reviewed"]) if d.get("last_reviewed") else None
+                except (TypeError, ValueError):
+                    return self.fail("bad state")
+                with db() as c:
+                    cur = c.execute(
+                        "UPDATE vocab_words SET reviews=?, correct=?, streak=?, due=?, last_reviewed=?, reason=? "
+                        "WHERE id=? AND user_id=?", (*state, last, merge_reasons("", str(d.get("reason") or "").split(",")),
+                                                    int(m.group(1)), user["id"]))
+                return self.send_json({"ok": True}) if cur.rowcount else self.fail("not found", 404)
             m = re.match(r"^/api/words/(\d+)/review$", p)
             if m:
                 user = self.auth()

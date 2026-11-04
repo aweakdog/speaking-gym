@@ -1312,6 +1312,21 @@ const wordSenses = (w) => (w.senses && w.senses.length ? w.senses
 function renderWordQuiz(quiz) {
   const { mode, items, idx, tally } = quiz;
   const quit = () => { bindCardKeys(null); memSub = "words"; renderMemory(); };
+  const undo = async () => {
+    if (!idx || quiz.undoing) return;
+    const p = items[idx - 1], last = (quiz.log || [])[idx - 1];
+    quiz.undoing = true;
+    try {
+      await api(`/api/words/${p.id}/unreview`, { json: { reviews: p.reviews, correct: p.correct, streak: p.streak, due: p.due, last_reviewed: p.last_reviewed, reason: p.reason } });
+    } catch (e) { alert("撤回失败：" + e.message); return; } finally { quiz.undoing = false; }
+    if (last) tally[last]--;
+    quiz.idx = idx - 1;
+    quiz.undone = last;
+    renderWordQuiz(quiz);
+  };
+  const prevBtn = idx ? `<button class="link-btn quiz-prev">← 上一个（撤回） <kbd>←</kbd></button>` : "";
+  const bindPrev = () => view.querySelectorAll(".quiz-prev").forEach((b) => { b.onclick = () => { b.blur(); undo(); }; });
+  const navKey = (k) => (k === "Escape" ? quit : k === "ArrowLeft" || k === "Backspace" ? undo : null);
   if (idx >= items.length) {
     view.innerHTML = `
       <div class="card">
@@ -1326,11 +1341,13 @@ function renderWordQuiz(quiz) {
         <div style="margin-top:12px">
           <button class="btn" id="btnQuizMore">再来一轮 <kbd>1</kbd></button>
           <button class="btn secondary" id="btnQuizBack">返回单词本 <kbd>Esc</kbd></button>
+          ${prevBtn}
         </div>
       </div>`;
     $("#btnQuizMore").onclick = () => startWordQuiz(mode);
     $("#btnQuizBack").onclick = quit;
-    bindCardKeys(view.firstElementChild, (k) => (k === "Escape" ? quit : k === "1" ? () => startWordQuiz(mode) : null));
+    bindPrev();
+    bindCardKeys(view.firstElementChild, (k) => navKey(k) || (k === "1" ? () => startWordQuiz(mode) : null));
     return;
   }
   const w = items[idx];
@@ -1340,6 +1357,7 @@ function renderWordQuiz(quiz) {
     if (graded) return;
     graded = true;
     tally[result]++;
+    (quiz.log ||= [])[idx] = result;
     try { await api(`/api/words/${w.id}/review`, { json: { result, reasons } }); } catch (_) {}
     quiz.idx++;
     renderWordQuiz(quiz);
@@ -1347,7 +1365,10 @@ function renderWordQuiz(quiz) {
   const senses = wordSenses(w), hasEn = senses.some((s) => s[1]);
   const forms = ((w.rel && w.rel.forms) || []).map((f) => f[1]);
   const had = reasonsOf(w);
-  const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span><span id="reasonTags">${reasonTags(had)}</span>`;
+  const undone = quiz.undone;
+  quiz.undone = null;
+  const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span><span id="reasonTags">${reasonTags(had)}</span>${prevBtn}`
+    + (undone ? `<div class="muted-sm">已撤回刚才的「${{ know: "认识", unsure: "模糊", forgot: "忘了" }[undone]}」，重新选一下</div>` : "");
   const pickReasons = (result, el, label) => {
     const added = new Set();
     const toggle = (r) => { if (!had.includes(r)) { if (added.has(r)) added.delete(r); else added.add(r); render(); } };
@@ -1385,7 +1406,7 @@ function renderWordQuiz(quiz) {
           <button class="btn" id="btnFlip">翻开看释义 <kbd>空格</kbd></button>
           <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
         </div>
-        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了（之后 2 / 3 / 4 补标原因，1 = 下一个），5 = 相关词，Esc = 退出</div>
+        <div class="muted-sm kbd-tip">键盘：空格 / 1 = 翻开，翻开后 1 = 认识，2 = 模糊，3 = 忘了（之后 2 / 3 / 4 补标原因，1 = 下一个），5 = 相关词，← = 上一个（撤回），Esc = 退出</div>
       </div>`;
     $("#btnSay").onclick = (e) => { e.currentTarget.blur(); speak(w.word); };
     bindSayEx(view);
@@ -1406,7 +1427,8 @@ function renderWordQuiz(quiz) {
     };
     keys = { "1": flip };
     $("#btnFlip").onclick = flip;
-    bindCardKeys(view.firstElementChild, (k) => (k === "Escape" ? quit : keys[k]));
+    bindPrev();
+    bindCardKeys(view.firstElementChild, (k) => navKey(k) || keys[k]);
     return;
   }
   view.innerHTML = `
@@ -1425,7 +1447,7 @@ function renderWordQuiz(quiz) {
         <button class="btn ghost" id="btnRecallReveal">想不起来，看答案</button>
         <button class="btn ghost" id="btnQuizQuit">退出 <kbd>Esc</kbd></button>
       </div>
-      <div class="muted-sm kbd-tip">键盘：回车 = 检查（空着回车 = 看答案），答错后 2 / 3 / 4 补标原因，回车 / 1 = 下一个，Esc = 退出</div>
+      <div class="muted-sm kbd-tip">键盘：回车 = 检查（空着回车 = 看答案），答错后 2 / 3 / 4 补标原因，回车 / 1 = 下一个，←（输入框空着时）= 上一个（撤回），Esc = 退出</div>
     </div>`;
   const input = $("#recallInput");
   input.focus();
@@ -1461,9 +1483,11 @@ function renderWordQuiz(quiz) {
   input.onkeydown = (e) => {
     if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); if (input.value.trim()) check(); else showAnswer(false, ""); }
     else if (e.key === "Escape") quit();
+    else if (e.key === "ArrowLeft" && !input.value) undo();
   };
   $("#btnRecallReveal").onclick = () => showAnswer(false, "");
-  bindCardKeys(view.firstElementChild, (k) => (k === "Escape" ? quit : keys[k]));
+  bindPrev();
+  bindCardKeys(view.firstElementChild, (k) => navKey(k) || keys[k]);
 }
 
 /* ---- 高频词积累：按 COCA 词频从高到低过词，不会 / 认错了的词自动进单词本 ---- */
