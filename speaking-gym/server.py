@@ -833,7 +833,11 @@ FREQ_REASONS = {"unknown": "不会", "wrong": "认错意思", "sound": "不会�
 def attach_freq_info(rows):
     """高频词积累（或从词汇图）收进来的词：附上卡片上看过的英文义项、相关词和音标，复习时照样显示。"""
     for r in rows:
-        r["image"] = os.path.exists(word_image_path(r["word"]))
+        meta = word_image_path(r["word"])[:-4] + ".json"
+        r["image"] = os.path.exists(meta)
+        if r["image"]:
+            with open(meta, encoding="utf-8") as f:
+                r["image_phrase"] = json.load(f).get("phrase") or ""
     if any(r.get("source") in ("freq", "related") for r in rows):
         defs, rel, phonetic = freq_defs(), freq_related(), {w[1]: w[2] for w in freq_words()}
         for r in rows:
@@ -900,13 +904,15 @@ def enrich_word(wid, word):
 
 # ---------- 单词配图：DeepSeek 定风格和画面，千问文生图出图；每个词一张、存数据目录、所有用户共用 ----------
 IMAGE_PROMPT_SYSTEM = (
-    "You design one picture that helps a Chinese learner remember an English word. Given the word, its main meaning "
-    "and an example, return JSON ONLY: {\"style\": \"photo\" | \"realistic\" | \"flat\", \"prompt\": \"...\"}. "
-    "style: \"photo\" when the word is a concrete thing that can be photographed (apple, bridge, nurse); "
-    "\"realistic\" when the meaning can be shown as a realistic scene with people or objects (violate: a person "
-    "stepping over a no-entry barrier); \"flat\" only when a realistic scene would be confusing, such as grammar "
-    "words or very abstract ideas, then a simple illustration with clear symbols. prompt: an English description "
-    "of that single image in at most 60 words that makes the meaning obvious; no text, letters or captions."
+    "You design one picture that helps a Chinese learner remember an English word through a phrase that uses it. "
+    "Given the word, its main meaning and an example, first pick \"phrase\": a short, common, picturable phrase of "
+    "2-5 words containing the word (prominent: a prominent lawyer; violate: violate traffic rules; poet: a famous "
+    "poet reading; whereas: hot coffee, whereas iced tea). Then return JSON ONLY: {\"phrase\": \"...\", \"style\": "
+    "\"photo\" | \"realistic\" | \"flat\", \"prompt\": \"...\"}. style: \"photo\" when the phrase is a concrete "
+    "thing or person that can be photographed; \"realistic\" when it can be shown as a realistic scene; \"flat\" "
+    "only when a realistic scene would be confusing, then a simple illustration with clear symbols. prompt: an "
+    "English description, at most 60 words, of one image that shows exactly that phrase (for a prominent lawyer: a "
+    "well-known lawyer surrounded by reporters and cameras outside a courthouse); no text, letters or captions."
 )
 IMAGE_STYLES = {"photo": "A real photograph, natural light, sharp focus: ",
                 "realistic": "A photorealistic scene: ",
@@ -945,7 +951,8 @@ def make_word_image(word, meaning="", example=""):
         f.write(raw)
     os.replace(path + ".tmp", path)
     with open(path[:-4] + ".json", "w", encoding="utf-8") as f:
-        json.dump({"word": word, "style": style, "prompt": plan.get("prompt")}, f, ensure_ascii=False)
+        json.dump({"word": word, "phrase": str(plan.get("phrase") or "")[:60], "style": style,
+                   "prompt": plan.get("prompt")}, f, ensure_ascii=False)
     return path
 
 
