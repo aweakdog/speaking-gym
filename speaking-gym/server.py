@@ -957,8 +957,10 @@ def make_word_image(word, meaning="", example=""):
 
 
 def queue_word_image(word, meaning="", example=""):
-    """排队后台出图（一次一张）；config.json 里 word_images 打开才会生成。"""
+    """排队后台出图（一次一张）；config.json 里 word_images 打开才会生成；连词、介词画不出来，不配图。"""
     if not (CONFIG.get("word_images") and DEEPSEEK_KEY and QWEN_KEY) or os.path.exists(word_image_path(word)):
+        return
+    if (freq_defs().get(str(word).lower()) or [[""]])[0][0] in ("conj.", "prep."):
         return
     with _IMAGE_LOCK:
         if any(j[0] == word for j in _IMAGE_STATE["jobs"]):
