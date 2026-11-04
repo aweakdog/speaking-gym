@@ -1117,7 +1117,7 @@ async function renderWords(root) {
     ${shown.length ? shown.map((w) => `
       <div class="word-item" data-id="${w.id}">
         <div class="word-main">
-          <div class="word-head"><b class="word-text word-open" data-id="${w.id}">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button><button class="link-btn word-open" data-id="${w.id}">单词卡 ▸</button>
+          <div class="word-head"><b class="word-text word-open" data-id="${w.id}">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button><button class="link-btn word-open" data-id="${w.id}">单词卡 ▸</button>${w.image ? `<button class="img-tag word-open" data-id="${w.id}" title="这个词有配图，点开单词卡查看">有图</button>` : ""}
             <span class="word-streak">${"●".repeat(Math.min(w.streak, 5))}${"○".repeat(Math.max(0, 5 - Math.min(w.streak, 5)))}</span></div>
           <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
           ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}

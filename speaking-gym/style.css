@@ -265,6 +265,7 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .quiz-prev { margin-left: 8px; }
 .word-fig { margin: 0 auto 12px; text-align: center; }
 .word-text.word-open { cursor: pointer; }
+.img-tag { font: inherit; font-size: 12px; line-height: 18px; padding: 0 8px; margin-left: 6px; border: 1px solid #b9dccb; border-radius: 999px; background: #e9f5ef; color: #1f6f54; cursor: pointer; }
 .word-text.word-open:hover { text-decoration: underline; }
 .word-img { display: block; width: 300px; max-width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 12px; margin: 0 auto; background: #fff; }
 .word-fig figcaption { margin-top: 6px; font-size: 15px; font-weight: 600; font-style: italic; }
