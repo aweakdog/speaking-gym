@@ -844,12 +844,13 @@ def attach_freq_info(rows):
         if r["image"]:
             with open(meta, encoding="utf-8") as f:
                 r["image_phrase"] = json.load(f).get("phrase") or ""
-    if any(r.get("source") in ("freq", "related") for r in rows):
+    if rows:
         defs, rel, phonetic = freq_defs(), freq_related(), {w[1]: w[2] for w in freq_words()}
         for r in rows:
+            key = r["word"].lower()
+            r["rel"], r["phonetic"] = rel.get(key) or {}, phonetic.get(key, "")
             if r.get("source") in ("freq", "related"):
-                r["senses"], r["rel"], r["phonetic"] = (defs.get(r["word"]) or [], rel.get(r["word"]) or {},
-                                                        phonetic.get(r["word"], ""))
+                r["senses"] = defs.get(key) or []
 
 
 def freq_state(uid, n=0, start=0):
