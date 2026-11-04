@@ -27,6 +27,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.abspath(os.environ.get("SG_DATA_DIR", os.path.join(BASE, "data")))
 REC_DIR = os.path.join(DATA, "recordings")
 TTS_DIR = os.path.join(DATA, "tts")
+WORD_IMG_DIR = os.path.join(DATA, "word_images")
 PHOTO_DIR = os.path.join(DATA, "photos")
 os.makedirs(REC_DIR, exist_ok=True)
 os.makedirs(TTS_DIR, exist_ok=True)
@@ -42,6 +43,7 @@ DEEPSEEK_KEY = CONFIG.get("deepseek_api_key") or os.environ.get("DEEPSEEK_API_KE
 QWEN_KEY = CONFIG.get("qwen_api_key") or CONFIG.get("dashscope_api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
 QWEN_BASE = CONFIG.get("qwen_base_url") or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 QWEN_VISION_MODEL = CONFIG.get("qwen_vision_model") or "qwen3.8-flash"
+QWEN_IMAGE_MODEL = CONFIG.get("qwen_image_model") or "qwen-image-3.0"
 DEEPSEEK_MODEL = CONFIG.get("deepseek_model") or "deepseek-flash"
 DEEPSEEK_VISION_MODEL = CONFIG.get("deepseek_vision_model") or "deepseek-flash"
 # 视觉提供商：默认 deepseek（与文本共用一个账号）；配置 vision_provider="qwen" 可切回千问
@@ -703,6 +705,7 @@ def upsert_word(uid, word, meaning_en="", meaning_zh="", example="", context="",
             (uid, word, key, str(meaning_en or "")[:300], str(meaning_zh or "")[:300], str(example or "")[:300],
              str(context or "")[:300], merge_exchanges(None, exchange), source, now, date.today().isoformat(), now),
         )
+        queue_word_image(word, meaning_en or meaning_zh, example)
         return {"id": cur.lastrowid, "word": word, "new": True}
 
 
@@ -829,6 +832,8 @@ FREQ_REASONS = {"unknown": "不会", "wrong": "认错意思", "sound": "不会�
 
 def attach_freq_info(rows):
     """高频词积累（或从词汇图）收进来的词：附上卡片上看过的英文义项、相关词和音标，复习时照样显示。"""
+    for r in rows:
+        r["image"] = os.path.exists(word_image_path(r["word"]))
     if any(r.get("source") in ("freq", "related") for r in rows):
         defs, rel, phonetic = freq_defs(), freq_related(), {w[1]: w[2] for w in freq_words()}
         for r in rows:
@@ -891,6 +896,92 @@ def enrich_word(wid, word):
                           (info["meaning_en"], info["example"], wid))
     except Exception as e:
         sys.stderr.write("enrich word %s failed: %s\n" % (wid, e))
+
+
+# ---------- 单词配图：DeepSeek 定风格和画面，千问文生图出图；每个词一张、存数据目录、所有用户共用 ----------
+IMAGE_PROMPT_SYSTEM = (
+    "You design one picture that helps a Chinese learner remember an English word. Given the word, its main meaning "
+    "and an example, return JSON ONLY: {\"style\": \"photo\" | \"realistic\" | \"flat\", \"prompt\": \"...\"}. "
+    "style: \"photo\" when the word is a concrete thing that can be photographed (apple, bridge, nurse); "
+    "\"realistic\" when the meaning can be shown as a realistic scene with people or objects (violate: a person "
+    "stepping over a no-entry barrier); \"flat\" only when a realistic scene would be confusing, such as grammar "
+    "words or very abstract ideas, then a simple illustration with clear symbols. prompt: an English description "
+    "of that single image in at most 60 words that makes the meaning obvious; no text, letters or captions."
+)
+IMAGE_STYLES = {"photo": "A real photograph, natural light, sharp focus: ",
+                "realistic": "A photorealistic scene: ",
+                "flat": "A simple flat vector illustration with clean shapes and soft colors: "}
+_IMAGE_LOCK = threading.Lock()
+_IMAGE_STATE = {"jobs": [], "running": False}
+
+
+def word_image_path(word):
+    return os.path.join(WORD_IMG_DIR, re.sub(r"[^a-z0-9]+", "_", word_key(str(word))).strip("_") + ".png")
+
+
+def make_word_image(word, meaning="", example=""):
+    path = word_image_path(word)
+    if os.path.exists(path):
+        return path
+    plan = parse_chat_json(deepseek_call(
+        [{"role": "system", "content": IMAGE_PROMPT_SYSTEM},
+         {"role": "user", "content": "word: %s\nmeaning: %s\nexample: %s" % (word, meaning, example)}],
+        temperature=0.4, max_tokens=300))
+    style = plan.get("style") if plan.get("style") in IMAGE_STYLES else "realistic"
+    body = {"model": QWEN_IMAGE_MODEL,
+            "input": {"messages": [{"role": "user", "content": [
+                {"text": IMAGE_STYLES[style] + str(plan.get("prompt") or word)}]}]},
+            "parameters": {"size": "768*768", "negative_prompt": "text, letters, words, caption, watermark, logo",
+                           "watermark": False}}
+    req = urllib.request.Request(
+        QWEN_BASE.split("/compatible-mode")[0] + "/api/v1/services/aigc/multimodal-generation/generation",
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + QWEN_KEY})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        url = json.load(r)["output"]["choices"][0]["message"]["content"][0]["image"]
+    with urllib.request.urlopen(url, timeout=120) as r:
+        raw = r.read()
+    os.makedirs(WORD_IMG_DIR, exist_ok=True)
+    with open(path + ".tmp", "wb") as f:
+        f.write(raw)
+    os.replace(path + ".tmp", path)
+    with open(path[:-4] + ".json", "w", encoding="utf-8") as f:
+        json.dump({"word": word, "style": style, "prompt": plan.get("prompt")}, f, ensure_ascii=False)
+    return path
+
+
+def queue_word_image(word, meaning="", example=""):
+    """排队后台出图（一次一张）；config.json 里 word_images 打开才会生成。"""
+    if not (CONFIG.get("word_images") and DEEPSEEK_KEY and QWEN_KEY) or os.path.exists(word_image_path(word)):
+        return
+    with _IMAGE_LOCK:
+        if any(j[0] == word for j in _IMAGE_STATE["jobs"]):
+            return
+        _IMAGE_STATE["jobs"].append((word, meaning, example))
+        if _IMAGE_STATE["running"]:
+            return
+        _IMAGE_STATE["running"] = True
+    threading.Thread(target=_image_worker, daemon=True).start()
+
+
+def _image_worker():
+    while True:
+        with _IMAGE_LOCK:
+            if not _IMAGE_STATE["jobs"]:
+                _IMAGE_STATE["running"] = False
+                return
+            job = _IMAGE_STATE["jobs"].pop(0)
+        try:
+            make_word_image(*job)
+        except Exception as e:
+            sys.stderr.write("word image %s failed: %s\n" % (job[0], e))
+
+
+def backfill_word_images():
+    with db() as c:
+        rows = c.execute("SELECT MAX(word) AS word, MAX(meaning_en) AS en, MAX(meaning_zh) AS zh, MAX(example) AS ex "
+                         "FROM vocab_words GROUP BY word_key").fetchall()
+    for r in rows:
+        queue_word_image(r["word"], r["en"] or r["zh"] or "", r["ex"] or "")
 
 
 def tag_user_content(content, channel, typed_note, photo_desc=None):
@@ -2132,6 +2223,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     except Exception:
                         r["exchanges"] = []
                 return self.send_json({"items": rows})
+            if p == "/api/word_image":
+                if not self.auth():
+                    return self.fail("unauthorized", 401)
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                fp = word_image_path((q.get("w") or [""])[0][:60])
+                if not os.path.exists(fp):
+                    return self.fail("not found", 404)
+                with open(fp, "rb") as f:
+                    raw = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "private, max-age=604800")
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if p == "/api/freq/lookup":
                 user = self.auth()
                 if not user:
@@ -2647,6 +2754,8 @@ def main():
         print("Whisper: not installed, falling back to browser transcripts")
     threading.Thread(target=auto_organize_loop, daemon=True).start()
     threading.Thread(target=reminders_loop, daemon=True).start()
+    if CONFIG.get("word_images"):
+        threading.Thread(target=backfill_word_images, daemon=True).start()
     print("AI: %s" % (DEEPSEEK_MODEL if DEEPSEEK_KEY else "off"))
     print("Vision: %s" % ((VISION_PROVIDER + " / " + (DEEPSEEK_VISION_MODEL if VISION_PROVIDER == "deepseek" else QWEN_VISION_MODEL)) if vision_available() else "off"))
     print("Push: %s" % ("on" if push_available() else "off — pip3 install --user pywebpush"))

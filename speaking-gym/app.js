@@ -1365,6 +1365,7 @@ function renderWordQuiz(quiz) {
   const senses = wordSenses(w), hasEn = senses.some((s) => s[1]);
   const forms = ((w.rel && w.rel.forms) || []).map((f) => f[1]);
   const had = reasonsOf(w);
+  const img = w.image ? `<img class="word-img" src="/api/word_image?w=${encodeURIComponent(w.word)}&t=${encodeURIComponent(AUTH.token)}" alt="">` : "";
   const undone = quiz.undone;
   quiz.undone = null;
   const tag = (label) => `<span class="step-tag">单词复习 · ${label} · ${progress}</span><span id="reasonTags">${reasonTags(had)}</span>${prevBtn}`
@@ -1387,6 +1388,7 @@ function renderWordQuiz(quiz) {
   };
   const detail = `
     <div class="word-reveal">
+      ${img}
       ${sensesHtml(senses, w.word)}
       <div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 18}px">${esc(w.meaning_zh || "（无中文释义）")}</div>
       ${relHtml(w.rel, w.word, (senses[0] || [])[0])}
@@ -1435,6 +1437,7 @@ function renderWordQuiz(quiz) {
     <div class="card">
       ${tag("看义写词")}
       <div class="flashcard">
+        ${img}
         ${sensesHtml(senses, w.word, true, forms)}
         ${w.meaning_zh || !hasEn ? `<div class="word-zh zh-under" style="font-size:${hasEn ? 15 : 20}px">${esc(w.meaning_zh || "（无释义）")}</div>` : ""}
         <div class="word-add" style="margin-top:12px">

@@ -263,6 +263,7 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .wc-nav kbd { font-family: inherit; font-size: 11px; opacity: 0.7; margin-left: 4px; padding: 0 5px; border: 1px solid currentColor; border-radius: 4px; }
 .wc-head { text-align: center; }
 .quiz-prev { margin-left: 8px; }
+.word-img { display: block; width: 300px; max-width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 12px; margin: 0 auto 12px; background: #fff; }
 .quiz-prev kbd { font-family: inherit; font-size: 11px; opacity: 0.7; margin-left: 4px; padding: 0 5px; border: 1px solid currentColor; border-radius: 4px; }
 .rel-syn.r-i { background: #fff3e3; border-color: #f6d3a6; }
 .rel-syn.r-n { background: #f3f5f4; }
