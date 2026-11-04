@@ -1117,7 +1117,7 @@ async function renderWords(root) {
     ${shown.length ? shown.map((w) => `
       <div class="word-item" data-id="${w.id}">
         <div class="word-main">
-          <div class="word-head"><b class="word-text">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button>
+          <div class="word-head"><b class="word-text word-open" data-id="${w.id}">${esc(w.word)}</b><button class="link-btn word-say" data-w="${esc(w.word)}">🔊</button><button class="link-btn word-open" data-id="${w.id}">单词卡 ▸</button>
             <span class="word-streak">${"●".repeat(Math.min(w.streak, 5))}${"○".repeat(Math.max(0, 5 - Math.min(w.streak, 5)))}</span></div>
           <div class="word-zh">${esc(w.meaning_zh || "")}${w.meaning_en ? ` <span class="muted-sm">· ${esc(w.meaning_en)}</span>` : ""}</div>
           ${w.example ? `<div class="word-ex">${esc(w.example)}</div>` : ""}
@@ -1158,6 +1158,7 @@ async function renderWords(root) {
   $("#wordFilter").oninput = (e) => { root.dataset.filter = e.target.value; renderWords(root); };
   if (filterKey) { const f = $("#wordFilter"); f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
   root.querySelectorAll(".word-say").forEach((b) => { b.onclick = () => speak(b.dataset.w); });
+  root.querySelectorAll(".word-open").forEach((b) => { b.onclick = () => { const w = items.find((x) => String(x.id) === b.dataset.id); if (w) openWordCard(w.word, "", w); }; });
   root.querySelectorAll(".word-ask").forEach((b) => {
     b.onclick = () => askBuddyAbout(b.dataset.w);
   });
@@ -1264,13 +1265,15 @@ function wordCardKeys(e) {
   if (e.key === "Escape") { e.preventDefault(); closeWordCard(); }
   else if ((e.key === "ArrowLeft" || e.key === "Backspace") && wordCardStack.length > 1) { e.preventDefault(); wordCardBack(); }
 }
-function openWordCard(word, from) {
+const cardFromItem = (w) => ({ found: true, item: w, word: w.word, phonetic: w.phonetic || "", zh: w.meaning_zh || "", senses: wordSenses(w),
+  rel: w.rel || {}, in_book: true, image: w.image, image_phrase: w.image_phrase });
+function openWordCard(word, from, item) {
   if (!$("#wordCardOverlay")) {
     document.body.insertAdjacentHTML("beforeend", `<div id="wordCardOverlay" class="wc-overlay"><div class="card wc-card" id="wordCardBox"><p class="desc">加载中……</p></div></div>`);
     $("#wordCardOverlay").onclick = (e) => { if (e.target.id === "wordCardOverlay") closeWordCard(); };
     window.addEventListener("keydown", wordCardKeys, true);
   }
-  wordCardStack.push({ word, from });
+  wordCardStack.push({ word, from, data: item ? cardFromItem(item) : null });
   showWordCard(wordCardStack[wordCardStack.length - 1]);
 }
 async function showWordCard(entry, back) {
@@ -1284,10 +1287,14 @@ async function showWordCard(entry, back) {
     <div class="wc-nav">${prevWord ? `<button class="link-btn" id="wcBack">← 返回 ${esc(prevWord)}</button>` : "<span></span>"}<button class="link-btn" id="wcClose">关闭 <kbd>Esc</kbd></button></div>
     <div class="wc-head"><div class="flash-word">${esc(d.word)} <button class="link-btn" id="wcSay" style="font-size:22px">🔊</button></div>
       ${d.phonetic ? `<div class="freq-ph">/${esc(d.phonetic)}/</div>` : ""}
-      <div class="muted-sm">${d.found ? `高频词第 ${(d.idx + 1).toLocaleString()} 个` : "高频词表里没有这个词（多半是词组或比较少见的词）"}${entry.from ? ` · 从 ${esc(entry.from)} 的词汇图点进来` : ""}</div></div>
+      <div class="muted-sm">${d.item ? `单词本 · ${{ chat: "和 Buddy 聊到的", freq: "高频词积累", related: "相关词" }[d.item.source] || "手动添加"} · 复习 ${d.item.reviews} 次`
+        : d.found ? `高频词第 ${(d.idx + 1).toLocaleString()} 个` : "高频词表里没有这个词（多半是词组或比较少见的词）"}${entry.from ? ` · 从 ${esc(entry.from)} 的词汇图点进来` : ""}</div>
+      ${d.item ? reasonTags(reasonsOf(d.item)) : ""}</div>
+    ${d.image ? `<figure class="word-fig" style="margin-top:12px"><img class="word-img" src="/api/word_image?w=${encodeURIComponent(d.word)}&t=${encodeURIComponent(AUTH.token)}" alt="">${d.image_phrase ? `<figcaption>${esc(d.image_phrase)}</figcaption>` : ""}</figure>` : ""}
     ${d.found ? `<div class="word-reveal">${sensesHtml(d.senses, d.word)}
-      <div class="zh-under">${d.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>
-      ${relHtml(d.rel, d.word, (d.senses[0] || [])[0])}</div>` : ""}
+      ${d.zh ? `<div class="zh-under">${d.zh.split("；").map((l) => `<div class="freq-zh">${esc(l)}</div>`).join("")}</div>` : ""}
+      ${relHtml(d.rel, d.word, (d.senses[0] || [])[0])}
+      ${d.item ? wordExchangesHtml(d.item) : ""}</div>` : ""}
     <div style="margin-top:12px">${d.in_book ? `<span class="muted-sm">✓ 已在单词本里</span>` : `<button class="btn" id="wcAdd">加入单词本${d.found ? "" : "（AI 补释义）"}</button>`}</div>`;
   bindSayEx(box);
   const toggle = bindRel(box);

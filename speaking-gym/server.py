@@ -823,8 +823,14 @@ def freq_lookup(uid, word):
     with db() as c:
         in_book = c.execute("SELECT 1 FROM vocab_words WHERE user_id=? AND word_key=?",
                             (uid, word_key(w))).fetchone() is not None
+    meta = word_image_path(w)[:-4] + ".json"
+    phrase = None
+    if os.path.exists(meta):
+        with open(meta, encoding="utf-8") as f:
+            phrase = json.load(f).get("phrase") or ""
     return {"found": True, "idx": idx, "rank": rank, "word": w, "phonetic": phonetic, "zh": zh,
-            "senses": freq_defs().get(w) or [], "rel": freq_related().get(w) or {}, "in_book": in_book}
+            "senses": freq_defs().get(w) or [], "rel": freq_related().get(w) or {}, "in_book": in_book,
+            "image": phrase is not None, "image_phrase": phrase or ""}
 
 
 FREQ_REASONS = {"unknown": "不会", "wrong": "认错意思", "sound": "不会读音", "senses": "一词多义"}
