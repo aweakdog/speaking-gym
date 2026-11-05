@@ -44,7 +44,8 @@ SYSTEM = (
 HEAD = {"source": "forms: ECDICT exchange field; syn/ant/fam/cmp: DeepSeek (deepseek-flash) via "
                   "tools/build_freq_related.py", "fields": {
             "forms": "[[3|p|d|i|s|r|t, form], ...]", "syn": "[[word, i|n|f (informal/neutral/formal), note], ...]",
-            "ant": "[word, ...]", "fam": "[[word, pos], ...]", "cmp": "[word, ...]"}}
+            "ant": "[word, ...]", "fam": "[[word, pos], ...]", "cmp": "[word, ...]",
+            "reg": "i|n|f, register of the word itself (--register)"}}
 REGISTER = {"informal": "i", "neutral": "n", "formal": "f"}
 WORDISH = re.compile(r"[A-Za-z][A-Za-z' .-]{0,39}")
 FORM_POS = {"3": "v", "p": "v", "d": "v", "i": "v", "s": "n", "r": "a", "t": "a"}  # 词形只配给对应词性的词
@@ -108,6 +109,24 @@ def ask(key, batch):
             for w in [str(it.get("word") or "").strip().lower()] if w in want}
 
 
+REG_SYSTEM = (
+    "For each English word, give the register (style, not topic) of its most common meaning in American English. "
+    "\"i\" informal: casual or slangy, where a more neutral word exists (kid vs child, guy vs man, yeah vs yes, "
+    "awesome, grab, gonna, buck). \"f\" formal: bookish or official, where a more everyday word exists (commence vs "
+    "start, require vs need, obtain vs get, however vs but, legitimate, facilitate, notwithstanding). \"n\" neutral: "
+    "everything else, including everyday words (get, phone, movie, everyone, maybe, yes) and topic words that have "
+    "no plainer equivalent (political, economic, military, evidence, federal). Most words are neutral. Return JSON "
+    "ONLY: {\"items\": [{\"word\": \"...\", \"r\": \"i\"}]} with every input word exactly once."
+)
+
+
+def ask_reg(key, batch):
+    want = {w for w, _ in batch}
+    return {w: r for it in request_items(key, REG_SYSTEM, batch, 24)
+            for w, r in [(str(it.get("word") or "").strip().lower(), clean(it.get("r")).lower())]
+            if w in want and r in ("i", "n", "f")}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--words", default=os.path.join(ROOT, "freq_words.json"), help="词表（默认 freq_words.json）")
@@ -116,7 +135,9 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只补词表里前 N 个还没有相关词的词")
     ap.add_argument("--batch", type=int, default=25, help="每次请求多少个词（默认 25）")
     ap.add_argument("--workers", type=int, default=8, help="并发请求数（默认 8）")
+    ap.add_argument("--register", action="store_true", help="改为补主单词自己的语体 reg（i 口语 / n 中性 / f 书面），建议配 --batch 100")
     args = ap.parse_args()
+    field, asker = ("reg", ask_reg) if args.register else ("syn", ask)
     with open(args.words, encoding="utf-8") as f:
         words = [(w[1], w[3]) for w in json.load(f)["words"]]
     order = [w for w, _ in words]
@@ -142,8 +163,8 @@ def main():
     key = api_key()
     if not key:
         sys.exit(None if args.ecdict else "找不到 DeepSeek API Key（读取方式同 build_freq_defs.py）")
-    todo = [wz for wz in words if "syn" not in rel.get(wz[0], {})][:args.limit or None]
-    print("词表 %d 个词，已有相关词 %d 个，这次要补 %d 个" % (len(words), sum("syn" in v for v in rel.values()), len(todo)))
+    todo = [wz for wz in words if field not in rel.get(wz[0], {})][:args.limit or None]
+    print("词表 %d 个词，已有 %s %d 个，这次要补 %d 个" % (len(words), field, sum(field in v for v in rel.values()), len(todo)))
     fresh, last = [], time.time()
     try:
         for size in (args.batch, max(1, args.batch // 5), 1):  # 没成的词换小批重试，最后逐个来
@@ -151,25 +172,25 @@ def main():
                 break
             batches = [todo[i:i + size] for i in range(0, len(todo), size)]
             print("每批 %d 个词，共 %d 批" % (size, len(batches)))
-            for n, (res, err) in enumerate(run(lambda b: ask(key, b), batches, args.workers), 1):
+            for n, (res, err) in enumerate(run(lambda b: asker(key, b), batches, args.workers), 1):
                 if isinstance(err, Fatal):
                     raise err
                 if err:
                     print("  一批请求失败：%s" % err, file=sys.stderr)
                 for w, r in (res or {}).items():
-                    rel.setdefault(w, {}).update(r)
+                    rel.setdefault(w, {}).update({"reg": r} if args.register else r)
                     fresh.append(w)
                 if time.time() - last > 10 or n == len(batches):
                     save(args.out, rel, order, HEAD, "words")
                     last = time.time()
                     print("  %d/%d 批 · 用量：输入 %d / 输出 %d tokens" % (n, len(batches), USAGE["in"], USAGE["out"]))
-            todo = [wz for wz in todo if "syn" not in rel.get(wz[0], {})]
+            todo = [wz for wz in todo if field not in rel.get(wz[0], {})]
     except (KeyboardInterrupt, Fatal) as e:
         save(args.out, rel, order, HEAD, "words")
         sys.exit("\n%s。进度已保存，再运行一次会从断点继续" % (e if isinstance(e, Fatal) else "已中断"))
     save(args.out, rel, order, HEAD, "words")
-    print("完成：新增 %d 个，共有相关词 %d / %d 个；用量：输入 %d / 输出 %d tokens"
-          % (len(fresh), sum("syn" in v for v in rel.values()), len(words), USAGE["in"], USAGE["out"]))
+    print("完成：新增 %d 个，共有 %s %d / %d 个；用量：输入 %d / 输出 %d tokens"
+          % (len(fresh), field, sum(field in v for v in rel.values()), len(words), USAGE["in"], USAGE["out"]))
     if todo:
         print("仍缺 %d 个（再运行一次会补）：%s" % (len(todo), " ".join(w for w, _ in todo[:30])))
     for w in random.sample(fresh, min(5, len(fresh))):

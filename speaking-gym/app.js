@@ -1218,8 +1218,9 @@ function relHtml(rel, word, pos = "") {
     const same = forms.find((x) => x[0] === f);
     if (same) same[1] += "·" + FORM_LABELS[k]; else forms.push([f, FORM_LABELS[k]]);
   }
-  const { syn = [], ant = [], fam = [], cmp = [] } = rel || {};
+  const { syn = [], ant = [], fam = [], cmp = [], reg } = rel || {};
   if (!forms.length && !syn.length && !ant.length && !fam.length && !cmp.length) return "";
+  const regName = { i: "口语", n: "中性", f: "书面" }[reg];
   const chip = (t, sub, cls = "") => `<button class="rel-chip say-ex ${cls}" data-t="${esc(t)}">${esc(t)}${sub ? `<small>${esc(sub)}</small>` : ""}</button>`;
   const jump = (t, p, note, cls = "") => `<button class="rel-chip rel-jump ${cls}" data-w="${esc(t)}"><span>${esc(t)}${p ? `<i>${esc(p)}</i>` : ""}</span>${note ? `<small>${esc(note)}</small>` : ""}</button>`;
   const group = (label, chips, cls = "") => `<div class="rel-group ${cls}">${chips.length ? `<span class="rel-label">${label}</span>${chips.join("")}` : ""}</div>`;
@@ -1230,10 +1231,10 @@ function relHtml(rel, word, pos = "") {
         ${forms.length ? group("词形", forms.map(([f, l]) => chip(f, l))) : ""}
         <div class="rel-mid">
           ${group("反义", ant.map((w) => jump(w, pos)), "rel-left")}
-          <div class="rel-hub">${esc(word)}</div>
+          <div class="rel-hub">${esc(word)}${regName ? `<small>${regName}</small>` : ""}</div>
           ${group("词族", fam.map(([w, p]) => jump(w, p)), "rel-right")}
         </div>
-        ${syn.length ? `<div class="rel-axis"><div class="rel-scale"><span>口语</span><span>中性</span><span>书面</span></div>
+        ${syn.length ? `<div class="rel-axis">${regName ? `<div class="rel-self r-${reg}"><span>▼ ${esc(word)}</span></div>` : ""}<div class="rel-scale"><span>口语</span><span>中性</span><span>书面</span></div>
           <div class="rel-cols">${["i", "n", "f"].map((r) => `<div>${syn.filter((s) => s[1] === r).map(([w, , n]) => jump(w, pos, n, "rel-syn r-" + r)).join("")}</div>`).join("")}</div></div>` : ""}
         ${cmp.length ? group("搭配 / 复合词", cmp.map((w) => jump(w))) : ""}
         <div class="muted-sm rel-hint">点相关词可以打开它的卡片</div>

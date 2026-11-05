@@ -249,6 +249,11 @@ audio { width: 100%; margin-top: 8px; height: 36px; }
 .rel-hub { position: relative; background: var(--accent); color: #fff; font-weight: 800; font-size: 18px; border-radius: 999px; padding: 6px 18px; }
 .rel-hub::before, .rel-hub::after { content: ""; position: absolute; left: 50%; height: 16px; border-left: 2px solid #b9dcd6; }
 .rel-hub::before { bottom: 100%; }
+.rel-hub small { display: block; text-align: center; font-size: 11px; font-weight: 600; opacity: 0.85; line-height: 1.2; }
+.rel-self { display: flex; font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 2px; }
+.rel-self.r-i { justify-content: flex-start; }
+.rel-self.r-n { justify-content: center; }
+.rel-self.r-f { justify-content: flex-end; }
 .rel-hub::after { top: 100%; }
 .rel-scale { display: flex; justify-content: space-between; font-size: 11.5px; font-weight: 700; color: var(--muted); padding-top: 6px; margin-bottom: 6px; border-top: 4px solid transparent; border-image: linear-gradient(90deg, #f0a24b, #b8c2c0, #4f7fd6) 1; }
 .rel-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; }
